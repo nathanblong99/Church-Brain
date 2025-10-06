@@ -1,0 +1,1 @@
+Hi {{name}}, could you help with {{role}} at {{event_time}}? Reply YES or NO. Thank you!

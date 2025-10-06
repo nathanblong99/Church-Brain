@@ -1,0 +1,4 @@
+# Method: rebalance_roles
+# Adjust targets downward then unassign excess, offer transfers, notify staff (future).
+
+strategy: demote_latest

@@ -1,0 +1,1 @@
+Last call: We still need {{remaining}} volunteers for {{role}} at {{event_time}}. Can you help? Reply YES.

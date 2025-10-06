@@ -1,0 +1,318 @@
+```markdown
+# COPILOT_BUILD_GUIDE.md — Build the Church Brain (No Side Quests)
+
+A strict, end-to-end guide for VS Code Copilot/Cursor to implement the **Church Brain** exactly as designed.  
+**Two lanes, one truth:** Lane A reads (Q&A), Lane B acts (operations). Planner plans; Executor acts. Small verbs; no bloat.
+
+---
+
+## 0) North Star
+
+**Mission:** “Less admin. More ministry.”  
+**Product:** **Church Brain** — a unified assistant that:
+- **Lane A — Q&A Engine (read-only):** Answers questions from structured data.
+- **Lane B — Operations Engine (read/write):** Performs admin tasks (volunteers, rooms, comms) safely.
+
+**Golden Rules**
+- **Planner (LLM) plans; Executor acts.**
+- **Database state is truth; plans are disposable.**
+- **Small, generic verbs; adapters do I/O.**
+- **Shard work; serialize per shard; replan on events.**
+- **No scope creep. Build only what this guide specifies.**
+
+---
+
+## 1) Repository Layout (expected)
+
+```
+
+/src
+/router                 # Intent → Lane A / Lane B / Hybrid
+/laneA                  # Q&A: schema card, catalog ops, plan/compose wrappers
+/laneB                  # Ops: planner, executor, verbs, methods
+/adapters               # DB/API connectors (people, calendar, messages, rooms, kb)
+/allocator              # Hold→Confirm for shared resources (rooms, volunteers)
+/authz                  # Policy engine (can(actor, action, resource, ctx))
+/state                  # DB models, event log, idempotency helpers, repositories
+/observability          # Logging, metrics, correlation IDs
+/templates              # Message templates (invite, transfer, last_call, summaries)
+/tests                    # Scenario & property tests (incl. “Catalyst”)
+COPILOT_BUILD_GUIDE.md
+
+```
+
+Do **not** reorganize without explicit instruction.
+
+---
+
+## 2) Router (must implement)
+
+**Purpose:** Route each inbound message to **Lane A**, **Lane B**, or **Hybrid**.
+
+**Rules:**
+- **Lane A** when the ask is informational with no side effects (“When are services?”).
+- **Lane B** when it changes state or sends messages (“Invite 10 volunteers,” “Book room”).
+- **Hybrid** for mixed asks: answer via Lane A, then propose/execute Lane B.
+
+**Output contract (internal):**
+- `route = { lane: "A"|"B"|"HYBRID", eventKey, tenantId, actor, channel }`
+- `eventKey` binds related work (e.g., `Catalyst@2025-12-24@Main`).
+
+---
+
+## 3) Lane A — Schema-Guided Q&A (read-only)
+
+**Objective:** Answer questions by fetching **only** needed facts via whitelisted **Catalog Ops**, then compose a concise reply.
+
+### 3.1 Schema Card (model context)
+A compact, versioned card (≤900 tokens) describing:
+- **Entities:** Service, Campus, Staff, Event, Ministry, FAQ, Location.
+- **Key fields & relationships.**
+- **Contract:** “Call Catalog Ops only. Never invent fields.”
+
+### 3.2 Catalog Ops (whitelisted queries)
+Examples (expand over time as data grows):
+- `service_times.by_date_and_campus(date|"next_sunday", campus?)`
+- `staff.lookup(role, campus?)`
+- `parking.by_campus(campus)`
+- `childcare.policy.by_service(service_time|date)`
+- `events.upcoming.by_campus(campus, limit)`
+- `faq.search(query)`
+
+**Flow:**
+1) **Plan pass:** LLM returns **plan JSON** with `calls: [{op, params}...]`.  
+2) **Execution:** Server validates ops/params → runs queries → returns **minimal rows**.  
+3) **Compose pass:** LLM receives results + context → writes a kind, concise answer; may offer helpful follow-ups (e.g., parking).
+
+**Safety:**
+- Lane A is **read-only**.
+- Enforce **role/column filters**.
+- **Semantic cache** for top FAQs; freshness rules.
+- **Validator** rejects unknown ops/params and triggers a repair prompt.
+
+---
+
+## 4) Lane B — Operations (Goal/Verb Engine)
+
+**Objective:** Perform admin tasks safely: volunteers, rooms, comms, updates.
+
+### 4.1 Core flow
+- **Planner (LLM):** Produces **validated JSON plan** using **verbs** (no side effects here).
+- **Executor:** Runs verbs deterministically; enforces **authz**, **idempotency**, **locks**, **invariants**, **budgets**, **retries**.
+- **Verbs:** Small, generic action surface (see 4.2).
+- **Adapters:** Encapsulate DB/API calls.
+- **Methods (data):** Recipes that compose verbs to fulfill goals (e.g., `fill_roles`, `rebalance_roles`).
+
+### 4.2 Verbs (keep the surface small)
+- **Read:** `people.search`, `kb.query`, `faq.search`, `calendar.lookup`
+- **Coordination:** `make_offers`, `wait_for_replies`, `assign`, `unassign`
+- **Comms:** `sms.send`, `email.send`, `notify.staff`
+- **Data writes:** `create_record`, `update_record`
+- **Scheduling:** `schedule.timer`
+- **Catalog:** `catalog.run(op, params)` (single verb to execute read-only Catalog Ops)
+
+**Verb requirements:** JSON-schema args; idempotency; authz; structured logs; no inline prose (use templates).
+
+### 4.3 Adapters
+- Per-domain connectors (People, Calendar, Messages, Rooms, KB).
+- Swappable without changing verb logic.
+- Respect row/column permissions and redactions.
+
+### 4.4 Methods (data, not code)
+- `fill_roles` — candidates → offers → replies → assign → notify.
+- `rebalance_roles` — adjust targets → demote latest → transfer offers → top-up.
+- `cancel_request` — cancel offers/assignments with courteous notices.
+- Message copy lives under `/templates`.
+
+---
+
+## 5) Concurrency (shard & serialize)
+
+**Shard keys** (examples):
+- `VolunteerRequest:{id}`
+- `Room:{roomId}`
+- `Campaign:{id}`
+- `Conversation:{threadId}`
+
+**Rules:**
+- **One worker at a time per shard** (queue partition or lock).
+- For each event: **load state → enforce invariants → plan/execute → persist**.
+- **Replan** on any meaningful event (cancel, update, timeout, override).
+
+---
+
+## 6) Resource Allocation (no collisions)
+
+**Allocator** owns shared resources (rooms, volunteers, equipment).
+
+- **Protocol:** **HOLD → CONFIRM** (holds have short TTL).
+- **Locks:** short critical-section per resource key (`room:{id}`, `volunteer:{id}`).
+- **DB constraints:** exclusion rules forbid overlapping **confirmed** reservations/assignments.
+- **Priorities:** higher-authority can preempt before confirm; after confirm, require explicit override policy.
+- **Idempotency keys** on alloc/confirm/cancel.
+
+Outcome: Two concurrent requests cannot “win” the same room/person.
+
+---
+
+## 7) Policies & Permissions (authz)
+
+- Enforce `authz.can(actor, action, resource, ctx)` at **every** verb that changes state or fans out messages.
+- **Default deny**; allow via roles/attributes/conditions/time windows; support priorities.
+- Natural-language policy updates: **NL → policy diff → human/OAuth approval → versioned commit**.
+- Provide **why-explanations** for allow/deny; support rollback.
+
+---
+
+## 8) Idempotency, Budgets, Safety
+
+- **Idempotency:** deterministic keys for outbound and allocation (e.g., `msg:{tenant}:{thread}:{person}:{kind}`).
+- **Budgets/timeboxes:** per method (max messages, fan-out/min, total duration).
+- **Circuit breakers:** degrade gracefully on SMS/email/DB issues (receive-only + human handoff).
+- **Observability:** event log, correlation IDs, planner plan, verb I/O, state transitions, metrics.
+
+---
+
+## 9) Catalyst Scenario — Acceptance Walkthrough
+
+**Inputs (near-simultaneous):**
+- Intern #1: “Invite 10 volunteers (5 basketball, 5 volleyball). Rent Gym 5:00–8:00.”
+- Intern #2: “Tell parents pick-up ~7:30 in west lot.”
+- +30s Pastor: “Make it 8 volunteers total; 5:30–8:30 pm.”
+
+**Must happen:**
+1) **Router** sets `eventKey=Catalyst@<date>@Main`; all three are **Lane B**.  
+2) **Shards:** Volunteers, Room, Campaign run in parallel, serialized within each shard.  
+3) **Volunteers:** `fill_roles` (5/5) → offers/replies/assign. On override: `rebalance_roles` to **4/4** by default; demote latest if over; cancel excess offers; offer transfers; notify staff.  
+4) **Room:** Allocator **HOLD 5:00–8:00**, then on override adjust to **5:30–8:30** and **CONFIRM** or propose alternatives if conflict. No double-book (DB constraint).  
+5) **Parents campaign:** Broadcast per policy; optional follow-up if schedule change policy requires.  
+6) **Policies:** intern limits, pastor priority respected.  
+7) **Idempotency:** no duplicate invites or messages.  
+8) **Logs/metrics:** correlation IDs across shards; decisions auditable.
+
+---
+
+## 10) Implementation Phases (build order)
+
+**Phase 1 — Kernel (Lane B skeleton)**
+- Executor with per-shard serialization, idempotency, invariants.  
+- Verb registry + schemas; minimal adapters (DB, messages).  
+- Methods: `fill_roles`, `rebalance_roles`; basic templates.  
+- Allocator: rooms (HOLD→CONFIRM) + volunteer overlap checks.  
+- Basic `authz.can` (role-based allow/deny).
+
+**Phase 2 — Lane A (Q&A)**
+- Schema Card v1; Catalog Ops engine; plan/compose passes.  
+- Semantic cache for top FAQs.
+
+**Phase 3 — Router & Hybrid**
+- Intent classifier; split mixed asks into A then B.  
+- Shared identity & audit across lanes.
+
+**Phase 4 — Policies & Simulation**
+- Policy store; NL→diff→approval→apply; why-explanations; rollback.
+
+**Phase 5 — Observability & Load**
+- Event log, metrics, queue lag dashboard; rate limiters; circuit breakers; chaos tests.
+
+---
+
+## 11) Definition of Done (strict)
+
+A change is **done** only if:
+1) It stays within the **verb surface** or adds a minimal new verb with schema + tests.  
+2) It **does not remove** planner LLM calls where planning is required.  
+3) It routes correctly via **router** and maintains **per-shard serialization**.  
+4) **Authz** enforced at verb boundaries; no side-effect bypass.  
+5) **Idempotency** & **allocator** rules respected; no double-bookings/sends.  
+6) Logs include **plan JSON**, **verb I/O**, **correlation IDs**; metrics updated.  
+7) Scenario tests pass, including the **Catalyst** override flow.
+
+---
+
+## 12) Things You Must NOT Do
+
+- Do **not** add UIs, dashboards, payments, CMS, analytics, or marketing pages.  
+- Do **not** “optimize” away the planner LLM from operations.  
+- Do **not** invent new verbs for one-offs; compose with existing verbs first.  
+- Do **not** bypass the allocator for rooms/volunteers.  
+- Do **not** request API keys again; assume env/config present.  
+- Do **not** log secrets or include the whole DB in prompts.
+
+---
+
+## 13) Communication Style for Changes
+
+- Keep PRs **small and surgical**.  
+- Reference this guide when rejecting scope creep.  
+- Prefer tests + method templates over speculative features.  
+- When blocked, ask **one precise question** (lane? shard? policy? idempotency key?).
+
+---
+
+## 14) One-Line Mantra
+
+> **Two lanes, one truth:** Lane A reads via Catalog Ops; Lane B acts via Verbs. Planner plans; Executor acts. Small verbs, no bloat.
+
+---
+
+## 15) Terminology & How to Talk to Copilot (short, authoritative)
+
+- **Church Brain** — the entire system/product (both lanes, policies, data, adapters, infra).  
+- **Codebase** — the repository we’re editing (files, folders, source).  
+- **LLM** — the external language model API (Gemini). Planner/Q&A composition only; no side effects.
+
+- **Lane A (Q&A Engine)** — schema-guided, **read-only**; uses **Schema Card** + **Catalog Ops**.  
+- **Lane B (Operations Engine)** — **Planner → Executor → Verbs → Adapters → Data** (read/write, with authz/locks/idempotency).  
+- **Verb** — named, atomic, deterministic action run by the Executor (not a workflow).  
+- **Adapter** — I/O connector a verb uses (DB/API).  
+- **Catalog Op** — whitelisted **read-only** query name for Lane A.  
+- **Method** — data-defined recipe that **composes verbs**.  
+- **Allocator** — Hold→Confirm + DB constraints for shared resources.  
+- **Authz/Policy** — versioned allow/deny rules; default deny; explainable.  
+- **Shard** — unit of serialization (e.g., VolunteerRequest:{id}).  
+- **Idempotency Key** — deterministic key preventing duplicates.  
+- **Event Log / Correlation ID** — audit trail linking plans, actions, outcomes.
+
+**How to phrase requests to Copilot**
+- “**Route to Lane A** and answer via **Catalog Ops**.”  
+- “**Implement in Lane B** as a **Method** using existing **Verbs**.”  
+- “**Wire the LLM** here (validated JSON plan; planner has **no side effects**).”  
+- “**Use the Allocator** (Hold→Confirm) with DB overlap constraints.”  
+- “**Enforce authz** at verb boundaries; default deny; explain denials.”  
+- “**Keep per-shard serialization** and **idempotency**; replan on events.”  
+- “**No side quests**.”
+
+---
+
+## 16) Interaction Channels (now vs later)
+
+**Production intent (later):**
+- **A) SMS (Twilio API)**  
+  - Inbound webhook → **router** (same lanes/policies).  
+  - Outbound via `sms.send` messages adapter.  
+  - Enforce carrier compliance (STOP/HELP), rate limits, idempotency.
+
+- **B) Lightweight Desktop Portal (chat to Church Brain)**  
+  - Authenticated staff chat UI (minimal): one pane + status summaries.  
+  - Talks directly to **router**; same lanes/policies; uses OAuth/SSO.
+
+**Development mode (now):**
+- **Manual injection via CLI/terminal** only:  
+  - Push test messages to the router with `actor`, `channel` (`sms`|`portal`|`cli`), `tenantId`, and optional `eventKey`.  
+  - Every injected message gets a **correlation ID**; router prints chosen **lane** and **shard**.  
+  - Use a **dev Messages Adapter** that logs to a local outbox; **no external sends**.
+
+**Channel notes:**
+- Routing is content-based (intent), not channel-based.  
+- Policy can vary by channel (e.g., broadcast approvals for SMS).  
+- SMS must honor STOP/UNSTOP/HELP and quiet-hour policies if configured.  
+- Twilio webhook/Portal connect later via a stable **Message Envelope** (tenantId, actor, channel, text, timestamp, eventKey?).
+
+**Acceptance for this section:**
+- CLI path exists (`cli → router → lanes`) with correlation IDs and shard assignment.  
+- Dev messages adapter logs outbound sends with idempotency keys.  
+- Later, Twilio + Portal integrate **without changing router logic**.
+
+---
+```

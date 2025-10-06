@@ -1,0 +1,40 @@
+Schema Card v1
+Purpose: Provide the Lane A Q&A LLM a compact map of permissible data. Lane A is READ-ONLY. The LLM must only request data via Catalog Ops. Never invent fields, values, or relationships not declared here.
+
+Entities (core fields only — minimal surface):
+1. Service: id, campus_id, date (YYYY-MM-DD), time (HH:MM), childcare_available (bool)
+2. Campus: id, name, address, parking_notes?
+3. Staff: id, name, role (pastor|staff|intern|volunteer_coordinator), campus_id?
+4. Event: id, name, start (ISO8601), end (ISO8601), campus_id
+5. Ministry: id, name
+6. FAQ: id, question, answer, tags[]
+7. Location: id, campus_id, name, address
+
+Relationships:
+- Service.campus_id -> Campus.id
+- Event.campus_id -> Campus.id
+- Staff.campus_id optional
+- Location.campus_id -> Campus.id
+
+Derived (do NOT fabricate):
+- "next_sunday" = upcoming calendar Sunday from today (UTC base).
+- Parking answers only use Campus.parking_notes.
+- Childcare answers only use Service.childcare_available.
+
+Authorized Catalog Ops (whitelist):
+- service_times.by_date_and_campus(date|"next_sunday", campus?) -> [{service_id, date, time, campus_name, childcare_available}]
+- staff.lookup(role, campus?) -> [{id, name, role, campus_name?}]
+- parking.by_campus(campus) -> [{campus_name, parking_notes}]
+- childcare.policy.by_service(service_time|date) -> [{date, time, campus_name, childcare_available}]
+- events.upcoming.by_campus(campus, limit) -> [{id, name, start, end, campus_name}]
+- faq.search(query) -> [{id, question, answer}]
+
+Plan Contract:
+Return JSON: {"calls": [{"op": op_name, "params": {...}}...]}. No prose. Only needed ops. Unknown ops must be removed or repaired.
+
+Compose Contract:
+Use only returned rows. Max ~80 words. Optionally add one follow-up suggestion (string) like: "Need parking info for another campus?" Avoid multiple suggestions.
+
+If insufficient data after ops: state limitation and suggest needed op.
+
+Redaction / Roles: (Phase 2) All columns public-safe; future phases may hide columns per role.

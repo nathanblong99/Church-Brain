@@ -1,0 +1,1 @@
+We have enough for {{from_role}}. Would you be willing to switch to {{to_role}}? Reply YES to transfer.

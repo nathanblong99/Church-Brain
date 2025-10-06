@@ -1,0 +1,10 @@
+# Method: fill_roles
+# Sequence (conceptual) - Phase 1 placeholder (not auto executed yet)
+# 1. people.search for candidates
+# 2. make_offers with candidate ids
+# 3. (Later) wait_for_replies
+# 4. assign accepted
+
+roles:
+  - basketball
+  - volleyball
