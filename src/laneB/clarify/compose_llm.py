@@ -5,7 +5,6 @@ If LLM env active we attempt to produce a natural language summary + question; o
 on simple templates.
 """
 from typing import List, Dict, Any, Optional
-import os
 from llm.provider import call_llm, safe_json_parse
 
 
@@ -36,12 +35,6 @@ def _fallback_question(chosen: Dict[str, Any]) -> str:
 
 
 def summarize_and_clarify(signals: List[Dict[str, Any]], chosen_question: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    if not os.getenv("CHURCH_BRAIN_USE_LLM"):
-        return {
-            "summary": _fallback_summary(signals),
-            "clarifying_question": _fallback_question(chosen_question) if chosen_question else None,
-            "clarifying_code": chosen_question.get("code") if chosen_question else None,
-        }
     # Build compact structured description of signals for prompt
     signal_desc = [{"type": s.get("type"), **{k:v for k,v in s.items() if k not in ("type",)}} for s in signals]
     question_code = chosen_question.get("code") if chosen_question else None
@@ -50,21 +43,27 @@ def summarize_and_clarify(signals: List[Dict[str, Any]], chosen_question: Option
         "produce JSON {\"summary\": str, \"question\": str|null}. Summary: 1 sentence. Question should be friendly and clear if code present.\n"
         f"Signals: {signal_desc}\nQuestionCode: {question_code}\nJSON:"
     )
-    raw = call_llm(prompt)
-    data, err = safe_json_parse(raw)
-    if err or not isinstance(data, dict) or 'summary' not in data:
-        # Retry once
-        repair = prompt + f"\nPrevious invalid output: {raw}\nReturn ONLY JSON."
-        raw2 = call_llm(repair)
-        data2, err2 = safe_json_parse(raw2)
-        if err2 or not isinstance(data2, dict) or 'summary' not in data2:
+    try:
+        raw = call_llm(prompt, response_mime_type="application/json")
+        data, err = safe_json_parse(raw)
+        if err or not isinstance(data, dict) or 'summary' not in data:
+            raise ValueError(err or "missing_summary")
+    except Exception:
+        # Retry once; if it still fails, fall back to deterministic phrasing.
+        try:
+            repair = prompt + "\nPrevious output invalid. Return ONLY valid JSON."
+            raw2 = call_llm(repair, response_mime_type="application/json")
+            data2, err2 = safe_json_parse(raw2)
+            if err2 or not isinstance(data2, dict) or 'summary' not in data2:
+                raise ValueError(err2 or "missing_summary")
+            data = data2
+        except Exception:
             return {
                 "summary": _fallback_summary(signals),
                 "clarifying_question": _fallback_question(chosen_question) if chosen_question else None,
                 "clarifying_code": question_code,
                 "_fallback_reason": "llm_parse_failed",
             }
-        data = data2
     return {
         "summary": data.get("summary") or _fallback_summary(signals),
         "clarifying_question": data.get("question") if question_code else None,

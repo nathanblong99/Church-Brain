@@ -15,6 +15,12 @@ def test_route_lane_b():
     }).json()
     assert r['lane'] == 'B'
 
+def test_route_lane_b_find_volunteers():
+    r = client.post('/route', json={
+        'tenant_id': 't1', 'actor_id': 'u1', 'actor_roles': ['pastor'], 'channel': 'cli', 'text': 'Find me 5 volunteers for next Wednesday night'
+    }).json()
+    assert r['lane'] == 'B'
+
 def test_route_hybrid():
     r = client.post('/route', json={
         'tenant_id': 't1', 'actor_id': 'u1', 'actor_roles': ['intern'], 'channel': 'cli', 'text': 'Invite 2 volunteers and when are services?'

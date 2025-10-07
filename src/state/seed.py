@@ -79,6 +79,13 @@ def load_dev_seed():
             "campus_id": campus_id
         })
     GLOBAL_DB.staff_directory = staff  # type: ignore
+    # Add specialized staff entries
+    staff.append({
+        "id": "staff_middle_school_pastor",
+        "name": "Pastor Jamie",
+        "role": "middle_school_pastor",
+        "campus_id": "c_main",
+    })
 
     # Services: 12 * scale Sundays at 09:00 & 11:00 (+ 17:00 evening every 2nd week for Main)
     services = []
@@ -140,6 +147,18 @@ def load_dev_seed():
             break
     GLOBAL_DB.events = events  # type: ignore
 
+    # Ministry schedules (e.g., student ministries)
+    GLOBAL_DB.ministry_schedules = [  # type: ignore
+        {
+            "id": "ministry_middle_school",
+            "name": "middle school",
+            "meeting_day": "Wednesday",
+            "meeting_time": "18:30",
+            "location": "Student Center",
+            "notes": "Weekly gathering with worship and small groups.",
+        }
+    ]
+
     # FAQs (static)
     GLOBAL_DB.faqs_full = [  # type: ignore
         {"id": "f_time", "question": "What time are Sunday services?", "answer": "Services at Main, North, South: 9:00 & 11:00 AM.", "tags": ["service_times"]},
@@ -170,6 +189,17 @@ def load_dev_seed():
         ("vr_static_4", 5, 5),
         ("vr_static_5", 6, 7),
     ]
+
+    timestamp_cursor = 0
+
+    def _record_vr(vr: VolunteerRequest):
+        nonlocal timestamp_cursor
+        ts = _dt(anchor, 9, 0) + timedelta(minutes=timestamp_cursor)
+        timestamp_cursor += 1
+        vr.created_at = ts
+        vr.updated_at = ts
+        GLOBAL_DB.volunteer_requests[vr.id] = vr
+
     for rid, b_need, v_need in fixed_requests:
         vr = VolunteerRequest(
             id=rid,
@@ -177,7 +207,7 @@ def load_dev_seed():
             basketball_needed=b_need,
             volleyball_needed=v_need,
         )
-        GLOBAL_DB.save_volunteer_request(vr)
+        _record_vr(vr)
 
     # Generated additional requests
     target_requests = 30 * scale
@@ -199,7 +229,7 @@ def load_dev_seed():
             assigned_v = min( max(0, v_need - 2), 3)
             vr.assignments["basketball"] = [f"staff_{i:04d}" for i in range(1, assigned_b + 1)]
             vr.assignments["volleyball"] = [f"staff_{i:04d}" for i in range(assigned_b + 1, assigned_b + 1 + assigned_v)]
-        GLOBAL_DB.save_volunteer_request(vr)
+        _record_vr(vr)
         current += 1
         idx += 1
 
@@ -207,7 +237,7 @@ def load_dev_seed():
     over = GLOBAL_DB.volunteer_requests.get("vr_static_3")
     if over:
         over.assignments["basketball"] = [f"staff_{i:04d}" for i in range(1, over.basketball_needed + 2)]  # +1 over target
-        GLOBAL_DB.save_volunteer_request(over)
+        GLOBAL_DB.volunteer_requests[over.id] = over
 
     # Rooms metadata + deterministic holds (expanded)
     GLOBAL_DB.rooms_meta = [  # type: ignore
@@ -266,6 +296,8 @@ def snapshot_hash() -> str:
             return sorted((_sort(o) for o in obj), key=lambda x: str(x))
         if isinstance(obj, dict):
             return {k: _sort(obj[k]) for k in sorted(obj.keys())}
+        if isinstance(obj, datetime):
+            return obj.isoformat()
         return obj
     normalized = _sort(payload)
     ser = json.dumps(normalized, separators=(",", ":"), sort_keys=True)

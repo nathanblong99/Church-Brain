@@ -17,8 +17,8 @@ class InMemoryDB:
         self.outbox: Dict[str, MessageOutboxItem] = {}
         self.idempotency: Dict[str, IdempotencyRecord] = {}
         self.shard_locks: Dict[str, ShardLock] = {}
-    # Conversation state (ephemeral) keyed by correlation_id
-    self.conversation_state: Dict[str, Dict[str, Any]] = {}
+        # Conversation state (ephemeral) keyed by correlation_id
+        self.conversation_state: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
 
     # Event log

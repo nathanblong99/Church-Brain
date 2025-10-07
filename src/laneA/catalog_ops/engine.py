@@ -10,6 +10,7 @@ ALLOWED_OPS: dict[str, list[str]] = {
     "childcare.policy.by_service": ["service_time", "date"],
     "events.upcoming.by_campus": ["campus", "limit"],
     "faq.search": ["query"],
+    "ministry.schedule.by_name": ["name"],
 }
 
 _NOW = datetime.utcnow
@@ -32,6 +33,16 @@ DATA = {
         {"id": "f1", "question": "What time are Sunday services?", "answer": "Services are at 9:00 and 11:00 AM at the Main campus.", "tags": ["service_times"]},
         {"id": "f2", "question": "Is childcare available?", "answer": "Childcare is offered during all morning services.", "tags": ["childcare"]},
         {"id": "f3", "question": "Where do I park?", "answer": "Park in the west lot; overflow is in the east lot.", "tags": ["parking"]},
+    ],
+    "ministry": [
+        {
+            "id": "ministry_middle_school",
+            "name": "middle school",
+            "meeting_day": "Wednesday",
+            "meeting_time": "18:30",
+            "location": "Student Center",
+            "notes": "Weekly gathering with worship and small groups.",
+        }
     ],
 }
 
@@ -96,6 +107,12 @@ try:  # avoid circular imports if imported early
         for f in getattr(GLOBAL_DB, "faqs_full"):
             if f["id"] not in faq_ids:
                 DATA["faq"].append(f)
+    # Ministry schedules
+    if hasattr(GLOBAL_DB, "ministry_schedules"):
+        ministry_ids = {m["id"] for m in DATA.get("ministry", [])}
+        for m in getattr(GLOBAL_DB, "ministry_schedules"):
+            if m["id"] not in ministry_ids:
+                DATA["ministry"].append(m)
 except Exception:
     pass
 
@@ -120,6 +137,19 @@ def run_catalog_op(op: str, params: Dict[str, Any]) -> Dict[str, Any]:
     allowed = ALLOWED_OPS[op]
     # discard unexpected params
     clean = {k: v for k, v in params.items() if k in allowed and v is not None}
+
+    # Helpers to combine baked-in + seeded data (avoids stale snapshots)
+    staff_records = list(DATA.get("staff", []))
+    if hasattr(GLOBAL_DB, "staff_directory"):
+        for s in getattr(GLOBAL_DB, "staff_directory"):
+            if not any(existing["id"] == s["id"] for existing in staff_records):
+                staff_records.append(s)
+
+    ministry_records = list(DATA.get("ministry", []))
+    if hasattr(GLOBAL_DB, "ministry_schedules"):
+        for m in getattr(GLOBAL_DB, "ministry_schedules"):
+            if not any(existing["id"] == m["id"] for existing in ministry_records):
+                ministry_records.append(m)
 
     if op == "service_times.by_date_and_campus":
         date = clean.get("date")
@@ -150,7 +180,7 @@ def run_catalog_op(op: str, params: Dict[str, Any]) -> Dict[str, Any]:
         campus = clean.get("campus")
         campus_id = _resolve_campus_id(campus) if campus else None
         rows = []
-        for s in DATA["staff"]:
+        for s in staff_records:
             if role and s["role"] != role:
                 continue
             if campus_id and s.get("campus_id") != campus_id:
@@ -215,6 +245,21 @@ def run_catalog_op(op: str, params: Dict[str, Any]) -> Dict[str, Any]:
             for f in DATA["faq"]:
                 if f["question"] in close:
                     rows.append({"id": f["id"], "question": f["question"], "answer": f["answer"]})
+        return {"op": op, "params": clean, "rows": rows}
+
+    if op == "ministry.schedule.by_name":
+        name = (clean.get("name") or "").lower()
+        rows = []
+        for m in ministry_records:
+            if not name or name in m.get("name", "").lower():
+                rows.append({
+                    "id": m["id"],
+                    "name": m["name"],
+                    "meeting_day": m.get("meeting_day"),
+                    "meeting_time": m.get("meeting_time"),
+                    "location": m.get("location"),
+                    "notes": m.get("notes"),
+                })
         return {"op": op, "params": clean, "rows": rows}
 
     return {"op": op, "params": clean, "rows": []}

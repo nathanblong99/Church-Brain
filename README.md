@@ -143,11 +143,8 @@ To simulate passage of time, prefer adjusting the anchor date (restart) instead 
 The repository now supports an optional LLM-driven planning/composition path for both lanes.
 
 Environment Flags:
-- `CHURCH_BRAIN_USE_LLM=1` enables LLM planners; omit or set `0` for deterministic heuristic fallback.
-- `LLM_PROVIDER=mock|gemini|openai` (default `mock`).
-	- `mock`: offline deterministic placeholders.
-	- `gemini`: Google Gemini (2.5 Flash etc.) – requires `GOOGLE_API_KEY`.
-	- `openai`: placeholder (not implemented yet).
+- `CHURCH_BRAIN_USE_LLM=1` enables LLM planners (must be set).
+- `LLM_PROVIDER=gemini` (only supported provider today).
 - Gemini variables: `GOOGLE_API_KEY`, `GEMINI_MODEL` (e.g. `gemini-2.5-flash`).
 
 Lane A Flow with LLM:
@@ -160,10 +157,6 @@ Lane B Flow with LLM:
 1. `_plan_with_llm` returns `{ "steps": [...] }` (verbs only; no side effects).
 2. Fallback heuristic parsing used on failure or empty plan.
 
-Safety & Determinism:
-- Disabled: identical heuristic behavior.
-- `mock`: deterministic, test friendly (empty JSON plans -> heuristic fallback).
-- `gemini`: placeholder until real HTTP integration is added (will still fallback on parse errors).
-- Extending to real network calls requires only modifying `call_llm` provider branch.
+- Safety note: if Gemini returns an error or credentials are missing, the planner/composer will raise and the request fails fast.
 
 See `.env.example` for configuration scaffold.
