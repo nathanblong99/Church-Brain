@@ -22,7 +22,7 @@ Derived (do NOT fabricate):
 - Childcare answers only use Service.childcare_available.
 
 Authorized Catalog Ops (whitelist):
-- service_times.by_date_and_campus(date|"next_sunday", campus?) -> [{service_id, date, time, campus_name, childcare_available}]
+- service_times.list(campus?, campus_id?, date|\"next_sunday\"?, start_date?, end_date?, limit?) -> [{service_id, date, time, campus_id, campus_name, campus_address?, parking_notes?, childcare_available}]
 - staff.lookup(role, campus?) -> [{id, name, role, campus_name?}]
 - parking.by_campus(campus) -> [{campus_name, parking_notes}]
 - childcare.policy.by_service(service_time|date) -> [{date, time, campus_name, childcare_available}]

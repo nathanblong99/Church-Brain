@@ -81,6 +81,40 @@ class Actor:
     roles: List[str]
     display: Optional[str] = None
 
+# Guest connections (volunteer hosts for new guests)
+@dataclass
+class GuestConnectionVolunteer:
+    id: str
+    tenant_id: str
+    name: str
+    phone: str
+    age_range: str
+    gender: str
+    marital_status: str
+    active: bool = True
+    last_matched_at: Optional[datetime] = None
+    currently_assigned_request_id: Optional[str] = None
+    created_at: datetime = field(default_factory=_now)
+    updated_at: datetime = field(default_factory=_now)
+
+@dataclass
+class GuestConnectionRequest:
+    id: str
+    tenant_id: str
+    guest_name: str
+    contact: str
+    age_range: str
+    gender: str
+    marital_status: str
+    status: str = "OPEN"  # OPEN | MATCHED | CLOSED
+    volunteer_id: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: datetime = field(default_factory=_now)
+    updated_at: datetime = field(default_factory=_now)
+
+    def is_open(self) -> bool:
+        return self.status == "OPEN"
+
 # Utility factories
 
 def new_id() -> str:

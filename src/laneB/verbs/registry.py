@@ -4,7 +4,13 @@ from pydantic import BaseModel, ValidationError
 from state.event_log import log
 from authz.engine import can as authz_can
 from state.repository import GLOBAL_DB
-from state.models import MessageOutboxItem, new_id, VolunteerRequest
+from state.models import (
+    MessageOutboxItem,
+    new_id,
+    VolunteerRequest,
+    GuestConnectionVolunteer,
+    GuestConnectionRequest,
+)
 from datetime import datetime
 
 class VerbContext(BaseModel):
@@ -232,6 +238,170 @@ class UpdateRecordVerb(BaseVerb):
             return VerbResult(ok=True, data={"id": req.id})
         return VerbResult(ok=False, error="unknown_kind")
 
+class GuestVolunteerRegisterArgs(BaseModel):
+    name: str
+    phone: str
+    age_range: str
+    gender: str
+    marital_status: str
+    active: bool | None = True
+
+@register
+class GuestVolunteerRegisterVerb(BaseVerb):
+    name = "guest_pairing.volunteer_register"
+    schema = GuestVolunteerRegisterArgs
+    authz_action = None  # allow guests to opt-in
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        phone = args["phone"].strip()
+        existing = GLOBAL_DB.find_guest_connection_volunteer_by_phone(ctx.tenant_id, phone)
+        if existing:
+            existing.name = args["name"]
+            existing.age_range = args["age_range"]
+            existing.gender = args["gender"]
+            existing.marital_status = args["marital_status"]
+            if args.get("active") is not None:
+                existing.active = args["active"]
+            existing.phone = phone
+            GLOBAL_DB.save_guest_connection_volunteer(existing)
+            return VerbResult(ok=True, data={"volunteer_id": existing.id, "status": "updated"})
+        volunteer = GuestConnectionVolunteer(
+            id=new_id(),
+            tenant_id=ctx.tenant_id,
+            name=args["name"],
+            phone=phone,
+            age_range=args["age_range"],
+            gender=args["gender"],
+            marital_status=args["marital_status"],
+            active=args.get("active", True),
+        )
+        GLOBAL_DB.save_guest_connection_volunteer(volunteer)
+        return VerbResult(ok=True, data={"volunteer_id": volunteer.id, "status": "created"})
+
+class GuestRequestCreateArgs(BaseModel):
+    guest_name: str
+    contact: str
+    age_range: str
+    gender: str
+    marital_status: str
+    notes: str | None = None
+
+@register
+class GuestRequestCreateVerb(BaseVerb):
+    name = "guest_pairing.request_create"
+    schema = GuestRequestCreateArgs
+    authz_action = None  # allow curious guests to request pairing
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        request = GuestConnectionRequest(
+            id=new_id(),
+            tenant_id=ctx.tenant_id,
+            guest_name=args["guest_name"],
+            contact=args["contact"],
+            age_range=args["age_range"],
+            gender=args["gender"],
+            marital_status=args["marital_status"],
+            notes=args.get("notes"),
+        )
+        GLOBAL_DB.save_guest_connection_request(request)
+        return VerbResult(ok=True, data={"request_id": request.id})
+
+class GuestMatchArgs(BaseModel):
+    request_id: str
+    limit: int = 3
+
+@register
+class GuestMatchVerb(BaseVerb):
+    name = "guest_pairing.match"
+    schema = GuestMatchArgs
+    authz_action = "volunteer.manage"
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        request = GLOBAL_DB.get_guest_connection_request(args["request_id"])
+        if not request:
+            return VerbResult(ok=False, error="guest_request_not_found")
+        if request.tenant_id != ctx.tenant_id:
+            return VerbResult(ok=False, error="tenant_mismatch")
+        volunteers = GLOBAL_DB.list_active_guest_connection_volunteers(ctx.tenant_id)
+        candidates: list[tuple[int, GuestConnectionVolunteer]] = []
+        for vol in volunteers:
+            if vol.currently_assigned_request_id and vol.currently_assigned_request_id != request.id:
+                continue
+            score = 0
+            if vol.age_range == request.age_range:
+                score += 1
+            if vol.gender == request.gender:
+                score += 1
+            if vol.marital_status == request.marital_status:
+                score += 1
+            candidates.append((score, vol))
+        if not candidates:
+            return VerbResult(ok=True, data={"matches": []})
+        def sort_key(item: tuple[int, GuestConnectionVolunteer]):
+            score, vol = item
+            last = vol.last_matched_at or datetime.fromtimestamp(0)
+            created = vol.created_at
+            reassigned_bias = 0 if vol.currently_assigned_request_id == request.id else 1
+            return (-score, reassigned_bias, last, created, vol.id)
+        candidates.sort(key=sort_key)
+        limit = max(1, min(args.get("limit", 3), 10))
+        matches = []
+        for score, vol in candidates[:limit]:
+            matches.append({
+                "volunteer_id": vol.id,
+                "name": vol.name,
+                "phone": vol.phone,
+                "age_range": vol.age_range,
+                "gender": vol.gender,
+                "marital_status": vol.marital_status,
+                "score": score,
+                "currently_assigned": vol.currently_assigned_request_id == request.id,
+            })
+        return VerbResult(ok=True, data={"matches": matches})
+
+class GuestAssignArgs(BaseModel):
+    request_id: str
+    volunteer_id: str
+
+@register
+class GuestAssignVerb(BaseVerb):
+    name = "guest_pairing.assign"
+    schema = GuestAssignArgs
+    authz_action = "volunteer.manage"
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        request = GLOBAL_DB.get_guest_connection_request(args["request_id"])
+        if not request:
+            return VerbResult(ok=False, error="guest_request_not_found")
+        if request.tenant_id != ctx.tenant_id:
+            return VerbResult(ok=False, error="tenant_mismatch")
+        volunteer = GLOBAL_DB.get_guest_connection_volunteer(args["volunteer_id"])
+        if not volunteer or volunteer.tenant_id != ctx.tenant_id:
+            return VerbResult(ok=False, error="volunteer_not_found")
+        if not volunteer.active:
+            return VerbResult(ok=False, error="volunteer_inactive")
+        if request.status == "CLOSED":
+            return VerbResult(ok=False, error="request_closed")
+        if volunteer.currently_assigned_request_id and volunteer.currently_assigned_request_id != request.id:
+            return VerbResult(ok=False, error="volunteer_already_assigned")
+        # release previously matched volunteer if different
+        if request.volunteer_id and request.volunteer_id != volunteer.id:
+            previous = GLOBAL_DB.get_guest_connection_volunteer(request.volunteer_id)
+            if previous and previous.currently_assigned_request_id == request.id:
+                previous.currently_assigned_request_id = None
+                GLOBAL_DB.save_guest_connection_volunteer(previous)
+        request.volunteer_id = volunteer.id
+        request.status = "MATCHED"
+        GLOBAL_DB.save_guest_connection_request(request)
+        volunteer.currently_assigned_request_id = request.id
+        volunteer.last_matched_at = datetime.utcnow()
+        GLOBAL_DB.save_guest_connection_volunteer(volunteer)
+        return VerbResult(ok=True, data={"request_id": request.id, "volunteer_id": volunteer.id})
+
 class ScheduleTimerArgs(BaseModel):
     delay_seconds: int
     payload: dict
@@ -265,7 +435,6 @@ class CatalogRunVerb(BaseVerb):
 
 # ---- Room Allocation Verbs (Phase 1 skeleton) ----
 from allocator import allocator as _alloc
-from datetime import datetime
 
 class RoomHoldArgs(BaseModel):
     room_id: str

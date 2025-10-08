@@ -1,8 +1,15 @@
 from __future__ import annotations
 from typing import Dict, List, Optional, Any, Iterable
 from .models import (
-    EventLogEntry, VolunteerRequest, RoomHold, MessageOutboxItem,
-    IdempotencyRecord, ShardLock, new_id
+    EventLogEntry,
+    VolunteerRequest,
+    RoomHold,
+    MessageOutboxItem,
+    IdempotencyRecord,
+    ShardLock,
+    GuestConnectionVolunteer,
+    GuestConnectionRequest,
+    new_id,
 )
 from datetime import datetime, timedelta
 import threading
@@ -17,6 +24,8 @@ class InMemoryDB:
         self.outbox: Dict[str, MessageOutboxItem] = {}
         self.idempotency: Dict[str, IdempotencyRecord] = {}
         self.shard_locks: Dict[str, ShardLock] = {}
+        self.guest_connection_volunteers: Dict[str, GuestConnectionVolunteer] = {}
+        self.guest_connection_requests: Dict[str, GuestConnectionRequest] = {}
         # Conversation state (ephemeral) keyed by correlation_id
         self.conversation_state: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
@@ -34,6 +43,37 @@ class InMemoryDB:
 
     def get_volunteer_request(self, req_id: str) -> Optional[VolunteerRequest]:
         return self.volunteer_requests.get(req_id)
+
+    # Guest connection volunteers
+    def save_guest_connection_volunteer(self, volunteer: GuestConnectionVolunteer):
+        with self._lock:
+            volunteer.updated_at = _NOW()
+            self.guest_connection_volunteers[volunteer.id] = volunteer
+
+    def get_guest_connection_volunteer(self, volunteer_id: str) -> Optional[GuestConnectionVolunteer]:
+        return self.guest_connection_volunteers.get(volunteer_id)
+
+    def find_guest_connection_volunteer_by_phone(self, tenant_id: str, phone: str) -> Optional[GuestConnectionVolunteer]:
+        for vol in self.guest_connection_volunteers.values():
+            if vol.tenant_id == tenant_id and vol.phone == phone:
+                return vol
+        return None
+
+    def list_active_guest_connection_volunteers(self, tenant_id: str) -> List[GuestConnectionVolunteer]:
+        return [
+            vol
+            for vol in self.guest_connection_volunteers.values()
+            if vol.tenant_id == tenant_id and vol.active
+        ]
+
+    # Guest connection requests
+    def save_guest_connection_request(self, request: GuestConnectionRequest):
+        with self._lock:
+            request.updated_at = _NOW()
+            self.guest_connection_requests[request.id] = request
+
+    def get_guest_connection_request(self, request_id: str) -> Optional[GuestConnectionRequest]:
+        return self.guest_connection_requests.get(request_id)
 
     # Room holds
     def save_room_hold(self, hold: RoomHold):

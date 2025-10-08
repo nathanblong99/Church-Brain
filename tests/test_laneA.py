@@ -8,7 +8,7 @@ client = TestClient(app)
 def test_service_times_next_sunday():
     resp = client.post("/qa", json={"question": "What time are services next Sunday?"}).json()
     assert "services" in resp["answer"].lower()
-    assert resp["plan"]["calls"][0]["op"].startswith("service_times.by_date_and_campus")
+    assert resp["plan"]["calls"][0]["op"].startswith("service_times.list")
 
 def test_staff_lookup_pastor():
     resp = client.post("/qa", json={"question": "Who is the pastor?"}).json()

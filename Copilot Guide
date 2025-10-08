@@ -53,6 +53,7 @@ Do **not** reorganize without explicit instruction.
 - **Lane A** when the ask is informational with no side effects (“When are services?”).
 - **Lane B** when it changes state or sends messages (“Invite 10 volunteers,” “Book room”).
 - **Hybrid** for mixed asks: answer via Lane A, then propose/execute Lane B.
+- **Hospitality pairing:** curious guests route HYBRID (Lane A answers welcome/faq; Lane B proposes `guest_pairing.request_create → guest_pairing.match → sms.send`). Volunteers texting "I can host a guest" run Lane B with `guest_pairing.volunteer_register` (no auth gate).
 
 **Output contract (internal):**
 - `route = { lane: "A"|"B"|"HYBRID", eventKey, tenantId, actor, channel }`
@@ -72,7 +73,7 @@ A compact, versioned card (≤900 tokens) describing:
 
 ### 3.2 Catalog Ops (whitelisted queries)
 Examples (expand over time as data grows):
-- `service_times.by_date_and_campus(date|"next_sunday", campus?)`
+- `service_times.list(campus?, campus_id?, date|"next_sunday"?, start_date?, end_date?, limit?)`
 - `staff.lookup(role, campus?)`
 - `parking.by_campus(campus)`
 - `childcare.policy.by_service(service_time|date)`
@@ -108,6 +109,7 @@ Examples (expand over time as data grows):
 - **Coordination:** `make_offers`, `wait_for_replies`, `assign`, `unassign`
 - **Comms:** `sms.send`, `email.send`, `notify.staff`
 - **Data writes:** `create_record`, `update_record`
+- **Guest pairing:** `guest_pairing.volunteer_register`, `guest_pairing.request_create`, `guest_pairing.match`, `guest_pairing.assign`
 - **Scheduling:** `schedule.timer`
 - **Catalog:** `catalog.run(op, params)` (single verb to execute read-only Catalog Ops)
 

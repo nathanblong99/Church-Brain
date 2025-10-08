@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import difflib
 
 ALLOWED_OPS: dict[str, list[str]] = {
-    "service_times.by_date_and_campus": ["date", "campus"],
+    "service_times.list": ["campus", "campus_id", "date", "start_date", "end_date", "limit"],
     "staff.lookup": ["role", "campus"],
     "parking.by_campus": ["campus"],
     "childcare.policy.by_service": ["service_time", "date"],
@@ -122,6 +122,12 @@ def _campus_name(campus_id: str) -> str:
             return c["name"]
     return campus_id
 
+def _campus_meta(campus_id: str) -> dict[str, Any]:
+    for c in DATA["campus"]:
+        if c["id"] == campus_id:
+            return c
+    return {"id": campus_id, "name": campus_id}
+
 def _resolve_campus_id(name_or_id: str | None) -> str | None:
     if not name_or_id:
         return None
@@ -130,11 +136,60 @@ def _resolve_campus_id(name_or_id: str | None) -> str | None:
             return c["id"]
     return None
 
+def _service_times_rows(params: Dict[str, Any]) -> list[dict[str, Any]]:
+    date = params.get("date")
+    start_date = params.get("start_date")
+    end_date = params.get("end_date")
+    campus = params.get("campus")
+    campus_id_param = params.get("campus_id")
+    limit = params.get("limit")
+    if date == "next_sunday":
+        today = _NOW().date()
+        days_ahead = (6 - today.weekday()) % 7
+        target = today + timedelta(days=days_ahead or 7)
+        date = str(target)
+    resolved_campus_id = _resolve_campus_id(campus_id_param or campus)
+    rows: list[dict[str, Any]] = []
+    for svc in sorted(DATA["service"], key=lambda s: (s["date"], s["time"])):
+        if date and svc["date"] != date:
+            continue
+        if start_date and svc["date"] < start_date:
+            continue
+        if end_date and svc["date"] > end_date:
+            continue
+        if resolved_campus_id and svc["campus_id"] != resolved_campus_id:
+            continue
+        meta = _campus_meta(svc["campus_id"])
+        rows.append({
+            "service_id": svc["id"],
+            "date": svc["date"],
+            "time": svc["time"],
+            "campus_id": svc["campus_id"],
+            "campus_name": meta.get("name", svc["campus_id"]),
+            "campus_address": meta.get("address"),
+            "parking_notes": meta.get("parking_notes"),
+            "childcare_available": svc.get("childcare_available", False),
+        })
+    if limit:
+        try:
+            lim = max(1, int(limit))
+            rows = rows[:lim]
+        except (TypeError, ValueError):
+            pass
+    return rows
+
 
 def run_catalog_op(op: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    normalized_op = op
     if op not in ALLOWED_OPS:
-        return {"error": "unknown_op"}
-    allowed = ALLOWED_OPS[op]
+        # Legacy compatibility
+        if op == "service_times.by_date_and_campus":
+            normalized_op = "service_times.list"
+            allowed = ["date", "campus"]
+        else:
+            return {"error": "unknown_op"}
+    else:
+        allowed = ALLOWED_OPS[normalized_op]
     # discard unexpected params
     clean = {k: v for k, v in params.items() if k in allowed and v is not None}
 
@@ -151,31 +206,11 @@ def run_catalog_op(op: str, params: Dict[str, Any]) -> Dict[str, Any]:
             if not any(existing["id"] == m["id"] for existing in ministry_records):
                 ministry_records.append(m)
 
-    if op == "service_times.by_date_and_campus":
-        date = clean.get("date")
-        campus = clean.get("campus")
-        if date == "next_sunday":
-            today = _NOW().date()
-            days_ahead = (6 - today.weekday()) % 7
-            target = today + timedelta(days=days_ahead or 7)
-            date = str(target)
-        campus_id = _resolve_campus_id(campus) if campus else None
-        rows = []
-        for svc in DATA["service"]:
-            if date and svc["date"] != date:
-                continue
-            if campus_id and svc["campus_id"] != campus_id:
-                continue
-            rows.append({
-                "service_id": svc["id"],
-                "date": svc["date"],
-                "time": svc["time"],
-                "campus_name": _campus_name(svc["campus_id"]),
-                "childcare_available": svc["childcare_available"],
-            })
+    if normalized_op == "service_times.list":
+        rows = _service_times_rows(clean)
         return {"op": op, "params": clean, "rows": rows}
 
-    if op == "staff.lookup":
+    if normalized_op == "staff.lookup":
         role = clean.get("role")
         campus = clean.get("campus")
         campus_id = _resolve_campus_id(campus) if campus else None
@@ -193,7 +228,7 @@ def run_catalog_op(op: str, params: Dict[str, Any]) -> Dict[str, Any]:
             })
         return {"op": op, "params": clean, "rows": rows}
 
-    if op == "parking.by_campus":
+    if normalized_op == "parking.by_campus":
         campus = clean.get("campus")
         campus_id = _resolve_campus_id(campus) if campus else None
         rows = []

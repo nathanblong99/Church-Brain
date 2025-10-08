@@ -58,7 +58,7 @@ Next Steps (Phase 1 polish):
 Components:
 - `laneA/schema_card.txt`: Versioned schema card (<=900 tokens) guiding Q&A.
 - `laneA/catalog_ops/engine.py`: In-memory dataset + whitelisted Catalog Ops.
-- `laneA/planner.py`: Heuristic plan generator -> JSON calls list.
+- `laneA/planner_llm.py`: LLM plan generator -> JSON calls list.
 - `laneA/qa_flow.py`: Plan validation, execution, composition, semantic cache.
 - `/qa` endpoint: POST {question} -> {answer, cached, plan, results}.
 
@@ -151,11 +151,11 @@ Lane A Flow with LLM:
 1. `planner_llm.plan_with_llm` builds JSON `{ "calls": [...] }` using allowed ops list.
 2. JSON validated; single repair attempt if invalid.
 3. Catalog ops executed.
-4. `planner_llm.compose_with_llm` produces final answer (fallback to heuristic if error).
+4. `planner_llm.compose_with_llm` produces the final answer.
 
 Lane B Flow with LLM:
 1. `_plan_with_llm` returns `{ "steps": [...] }` (verbs only; no side effects).
-2. Fallback heuristic parsing used on failure or empty plan.
+2. If the LLM plan fails validation after one repair attempt, the request fails fast (no heuristic fallback).
 
 - Safety note: if Gemini returns an error or credentials are missing, the planner/composer will raise and the request fails fast.
 

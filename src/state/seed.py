@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, date, time
 import os
 from hashlib import sha256
 from state.repository import GLOBAL_DB
-from state.models import VolunteerRequest, RoomHold
+from state.models import VolunteerRequest, RoomHold, GuestConnectionVolunteer, GuestConnectionRequest
 
 
 ANCHOR_ENV_VAR = "CHURCH_BRAIN_ANCHOR_DATE"  # YYYY-MM-DD
@@ -27,6 +27,8 @@ def reset_db_state():
     GLOBAL_DB.event_log.clear()
     GLOBAL_DB.volunteer_requests.clear()
     GLOBAL_DB.room_holds.clear()
+    GLOBAL_DB.guest_connection_volunteers.clear()
+    GLOBAL_DB.guest_connection_requests.clear()
     # do not clear idempotency/outbox by default (could be optional) but for reproducibility we will:
     GLOBAL_DB.outbox.clear()
     GLOBAL_DB.idempotency.clear()
@@ -239,6 +241,59 @@ def load_dev_seed():
         over.assignments["basketball"] = [f"staff_{i:04d}" for i in range(1, over.basketball_needed + 2)]  # +1 over target
         GLOBAL_DB.volunteer_requests[over.id] = over
 
+    # Guest connection volunteers (hospitality hosts)
+    host_cursor = 0
+
+    def _record_host(vol: GuestConnectionVolunteer):
+        nonlocal host_cursor
+        ts = _dt(anchor, 8, 0) + timedelta(minutes=host_cursor)
+        host_cursor += 1
+        vol.created_at = ts
+        vol.updated_at = ts
+        GLOBAL_DB.guest_connection_volunteers[vol.id] = vol
+
+    host_profiles = [
+        {"id": "guest_volunteer_1", "name": "Alicia Reed", "phone": "555-2001", "age_range": "adult", "gender": "female", "marital_status": "married"},
+        {"id": "guest_volunteer_2", "name": "Jordan Smith", "phone": "555-2002", "age_range": "young_adult", "gender": "male", "marital_status": "single"},
+        {"id": "guest_volunteer_3", "name": "Mei Chen", "phone": "555-2003", "age_range": "adult", "gender": "female", "marital_status": "single"},
+        {"id": "guest_volunteer_4", "name": "Carlos Diaz", "phone": "555-2004", "age_range": "adult", "gender": "male", "marital_status": "married"},
+        {"id": "guest_volunteer_5", "name": "Ruth Gallagher", "phone": "555-2005", "age_range": "senior", "gender": "female", "marital_status": "widowed"},
+        {"id": "guest_volunteer_6", "name": "Priya Patel", "phone": "555-2006", "age_range": "young_adult", "gender": "female", "marital_status": "married", "currently_assigned_request_id": "guest_req_matched_1"},
+    ]
+
+    for host in host_profiles:
+        vol = GuestConnectionVolunteer(
+            id=host["id"],
+            tenant_id="tenant_dev",
+            name=host["name"],
+            phone=host["phone"],
+            age_range=host["age_range"],
+            gender=host["gender"],
+            marital_status=host["marital_status"],
+            active=host.get("active", True),
+        )
+        if host.get("currently_assigned_request_id"):
+            vol.currently_assigned_request_id = host["currently_assigned_request_id"]
+            vol.last_matched_at = _dt(anchor, 7, 45)
+        _record_host(vol)
+
+    # Example matched guest request (kept separate from open requests created at runtime)
+    matched_request = GuestConnectionRequest(
+        id="guest_req_matched_1",
+        tenant_id="tenant_dev",
+        guest_name="Taylor Guest",
+        contact="taylor@example.com",
+        age_range="young_adult",
+        gender="female",
+        marital_status="married",
+        status="MATCHED",
+        volunteer_id="guest_volunteer_6",
+        notes="Prefers to sit near aisle.",
+    )
+    matched_request.created_at = _dt(anchor, 8, 30)
+    matched_request.updated_at = _dt(anchor, 8, 30)
+    GLOBAL_DB.guest_connection_requests[matched_request.id] = matched_request
+
     # Rooms metadata + deterministic holds (expanded)
     GLOBAL_DB.rooms_meta = [  # type: ignore
         {"id": "gym", "name": "Gym", "capacity": 400},
@@ -288,6 +343,8 @@ def snapshot_hash() -> str:
         "volunteer_requests": [vr.__dict__ for vr in GLOBAL_DB.volunteer_requests.values()],
         "room_holds": [rh.__dict__ for rh in GLOBAL_DB.room_holds.values()],
         "rooms_meta": getattr(GLOBAL_DB, "rooms_meta", []),
+        "guest_volunteers": [vol.__dict__ for vol in GLOBAL_DB.guest_connection_volunteers.values()],
+        "guest_requests": [req.__dict__ for req in GLOBAL_DB.guest_connection_requests.values()],
         "scale": _scale(),
     }
     # Sort for deterministic ordering

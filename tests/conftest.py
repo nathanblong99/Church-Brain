@@ -45,7 +45,7 @@ def _mock_lane_a_plan(prompt: str) -> str:
     calls: list[dict] = []
     lower = question.lower()
     if "service" in lower or "time" in lower:
-        calls.append({"op": "service_times.by_date_and_campus", "params": {"date": "next_sunday"}})
+        calls.append({"op": "service_times.list", "params": {"date": "next_sunday"}})
     if "child" in lower or "kid" in lower or "nursery" in lower:
         calls.append({"op": "childcare.policy.by_service", "params": {"date": "next_sunday"}})
     if "parking" in lower:
@@ -174,7 +174,7 @@ def _mock_response(prompt: str) -> str:
         if ("invite" in msg_lower and "when" in msg_lower) or ("book" in msg_lower and "what time" in msg_lower):
             return json.dumps({
                 "lane": "HYBRID",
-                "qa_plan": {"calls": [{"op": "service_times.by_date_and_campus", "params": {"date": "next_sunday"}}]},
+                "qa_plan": {"calls": [{"op": "service_times.list", "params": {"date": "next_sunday"}}]},
                 "execution_plan": {
                     "steps": [
                         {
