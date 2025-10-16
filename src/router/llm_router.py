@@ -18,6 +18,7 @@ def route_with_plan(
     actor_roles: list[str],
     existing_request_id: Optional[str] = None,
     include_plan: bool = True,
+    conversation_history: Optional[str] = None,
 ) -> Dict[str, Any]:
     ops_list = ", ".join(ALLOWED_OP_NAMES)
     verbs_list = ", ".join(VERB_NAMES)
@@ -45,9 +46,18 @@ def route_with_plan(
     else:
         plan_guidance = "Set qa_plan and execution_plan to null; only choose the correct lane."
 
+    history_block = (
+        "Recent conversation history (oldest to newest):\n"
+        f"{conversation_history}"
+        if conversation_history
+        else "Recent conversation history: none provided."
+    )
+
     context = (
         f"Tenant: {tenant_id}\nActor: {actor_id}\nActorRoles: {actor_roles}\n"
-        f"ExistingRequestId: {existing_request_id or 'null'}\nMessage: {message}"
+        f"ExistingRequestId: {existing_request_id or 'null'}\n"
+        f"{history_block}\n"
+        f"New inbound message: {message}"
     )
 
     prompt = "\n\n".join([base_prompt, lane_guidance, plan_guidance, schema_prompt, context, "JSON:"])

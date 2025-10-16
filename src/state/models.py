@@ -115,6 +115,15 @@ class GuestConnectionRequest:
     def is_open(self) -> bool:
         return self.status == "OPEN"
 
+@dataclass
+class ConversationMessage:
+    id: str
+    tenant_id: str
+    actor_id: str
+    role: str  # "user" | "assistant"
+    content: str
+    timestamp: datetime = field(default_factory=_now)
+
 # Utility factories
 
 def new_id() -> str:

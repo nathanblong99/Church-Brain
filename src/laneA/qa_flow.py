@@ -12,8 +12,8 @@ class CallSpec(BaseModel):
 class PlanModel(BaseModel):
     calls: List[CallSpec]
 
-def make_plan(question: str) -> dict:
-    return plan_with_llm(question)
+def make_plan(question: str, conversation_history: str | None = None) -> dict:
+    return plan_with_llm(question, conversation_history=conversation_history)
 
 def validate_plan(plan: dict) -> PlanModel:
     try:
@@ -36,28 +36,28 @@ def execute_calls(plan: PlanModel) -> list[dict[str, Any]]:
         results.append(out)
     return results
 
-def compose_answer(question: str, plan: PlanModel, results: list[dict[str, Any]]) -> str:
+def compose_answer(question: str, plan: PlanModel, results: list[dict[str, Any]], conversation_history: str | None = None) -> str:
     facts = {"calls": [c.dict() for c in plan.calls], "results": results}
     try:
-        return compose_with_llm(question, facts)
+        return compose_with_llm(question, facts, conversation_history=conversation_history)
     except Exception:
         # Minimal deterministic fallback to avoid empty responses during outages.
         if results:
             return "Unable to compose a full answer right now, but retrieved data successfully."
         return "Unable to compose an answer with the available information."
 
-def answer_question(question: str, precomputed_plan: dict | None = None) -> dict:
+def answer_question(question: str, precomputed_plan: dict | None = None, conversation_history: str | None = None) -> dict:
     if precomputed_plan is not None:
         try:
             plan_model = validate_plan(precomputed_plan)
         except ValueError as e:
             return {"error": str(e)}
     else:
-        raw_plan = make_plan(question)
+        raw_plan = make_plan(question, conversation_history=conversation_history)
         try:
             plan_model = validate_plan(raw_plan)
         except ValueError as e:
             return {"error": str(e)}
     results = execute_calls(plan_model)
-    answer = compose_answer(question, plan_model, results)
+    answer = compose_answer(question, plan_model, results, conversation_history=conversation_history)
     return {"cached": False, "answer": answer, "plan": plan_model.dict(), "results": results}

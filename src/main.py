@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from datetime import datetime
 import uuid
+from dotenv import load_dotenv
 from laneB.planner import planner
 from laneB.executor.executor import Executor
 from state.event_log import log
@@ -10,11 +11,29 @@ from laneA.qa_flow import answer_question
 from router.llm_router import route_with_plan
 from router.classifier import derive_event_key
 from state.seed import load_dev_seed
+from state.repository import GLOBAL_DB
 
 app = FastAPI(title="Church Brain Kernel Phase 1")
 
 # Load development mega-church seed data (idempotent)
+load_dotenv()
 load_dev_seed()
+
+HISTORY_LIMIT = 12
+
+
+def _format_history_for_prompt(tenant_id: str, actor_id: str) -> str | None:
+    history = GLOBAL_DB.get_conversation_history(tenant_id, actor_id, limit=HISTORY_LIMIT)
+    if not history:
+        return None
+    lines: list[str] = []
+    for msg in history:
+        speaker = "User" if msg.role == "user" else "Assistant"
+        lines.append(f"{speaker}: {msg.content}")
+    text = "\n".join(lines)
+    if len(text) > 2000:
+        text = text[-2000:]
+    return text
 
 class InboundMessage(BaseModel):
     tenant_id: str
@@ -34,7 +53,14 @@ class ExecuteResponse(BaseModel):
 @app.post("/plan", response_model=PlanResponse)
 def plan(msg: InboundMessage):
     correlation_id = uuid.uuid4().hex
-    plan_json = planner.plan(msg.tenant_id, msg.actor_id, msg.text, msg.existing_request_id)
+    history_text = _format_history_for_prompt(msg.tenant_id, msg.actor_id)
+    plan_json = planner.plan(
+        msg.tenant_id,
+        msg.actor_id,
+        msg.text,
+        msg.existing_request_id,
+        conversation_history=history_text,
+    )
     log("plan_created", correlation_id, msg.actor_id, msg.tenant_id, plan_json.get("shard"), {"plan": plan_json})
     return PlanResponse(correlation_id=correlation_id, plan=plan_json)
 
@@ -89,6 +115,7 @@ class RouteResponse(BaseModel):
 
 @app.post("/route", response_model=RouteResponse)
 def route(req: RouteRequest):
+    history_text = _format_history_for_prompt(req.tenant_id, req.actor_id)
     routing = route_with_plan(
         req.text,
         tenant_id=req.tenant_id,
@@ -96,6 +123,7 @@ def route(req: RouteRequest):
         actor_roles=req.actor_roles,
         existing_request_id=None,
         include_plan=False,
+        conversation_history=history_text,
     )
     lane = routing["lane"]
     event_key = derive_event_key(req.text)
@@ -118,6 +146,7 @@ class IngestResponse(BaseModel):
 def ingest(req: IngestRequest):
     event_key = derive_event_key(req.text)
     cid = uuid.uuid4().hex
+    history_text = _format_history_for_prompt(req.tenant_id, req.actor_id)
     routing = route_with_plan(
         req.text,
         tenant_id=req.tenant_id,
@@ -125,32 +154,106 @@ def ingest(req: IngestRequest):
         actor_roles=req.actor_roles,
         existing_request_id=req.existing_request_id,
         include_plan=True,
+        conversation_history=history_text,
     )
     lane = routing["lane"]
+    assistant_text: str | None = None
+    plan_payload: dict | None = None
+    results_payload: list | None = None
+
     if lane == "A":
         qa_plan = routing.get("qa_plan")
-        out = answer_question(req.text, precomputed_plan=qa_plan)
-        log("ingest_laneA", cid, req.actor_id, req.tenant_id, None, {"calls": out.get("plan", {}).get("calls", [])})
-        return IngestResponse(correlationId=cid, lane=lane, eventKey=event_key, answer=out.get("answer"), plan=out.get("plan"), results=out.get("results"))
-    if lane == "B":
+        out = answer_question(req.text, precomputed_plan=qa_plan, conversation_history=history_text)
+        log(
+            "ingest_laneA",
+            cid,
+            req.actor_id,
+            req.tenant_id,
+            None,
+            {"calls": out.get("plan", {}).get("calls", [])},
+        )
+        assistant_text = out.get("answer") or out.get("error")
+        plan_payload = out.get("plan") if isinstance(out.get("plan"), dict) else None
+        results_payload = out.get("results")
+        response = IngestResponse(
+            correlationId=cid,
+            lane=lane,
+            eventKey=event_key,
+            answer=assistant_text,
+            plan=plan_payload,
+            results=results_payload,
+        )
+    elif lane == "B":
         exec_plan_raw = routing.get("execution_plan")
         if not exec_plan_raw:
-            return IngestResponse(correlationId=cid, lane=lane, eventKey=event_key, plan=None, answer="Unable to plan lane B action.")
-        try:
-            validated = planner.validate_plan(exec_plan_raw, req.existing_request_id)
-        except ValueError as e:
-            return IngestResponse(correlationId=cid, lane=lane, eventKey=event_key, plan=None, answer=str(e))
-        log("ingest_laneB_plan", cid, req.actor_id, req.tenant_id, validated.get("shard"), {"plan": validated})
-        return IngestResponse(correlationId=cid, lane=lane, eventKey=event_key, plan=validated)
-    # HYBRID: answer first, propose plan (no execution)
-    qa_plan = routing.get("qa_plan")
-    exec_plan_raw = routing.get("execution_plan")
-    ans = answer_question(req.text, precomputed_plan=qa_plan)
-    exec_plan_validated = None
-    if exec_plan_raw:
-        try:
-            exec_plan_validated = planner.validate_plan(exec_plan_raw, req.existing_request_id)
-        except ValueError as e:
-            exec_plan_validated = {"error": str(e)}
-    log("ingest_hybrid", cid, req.actor_id, req.tenant_id, (exec_plan_validated or {}).get("shard") if isinstance(exec_plan_validated, dict) else None, {"qa_calls": ans.get("plan", {}).get("calls", []), "plan": exec_plan_validated})
-    return IngestResponse(correlationId=cid, lane=lane, eventKey=event_key, answer=ans.get("answer"), plan=exec_plan_validated, results=ans.get("results"))
+            assistant_text = "Unable to plan lane B action."
+            response = IngestResponse(
+                correlationId=cid,
+                lane=lane,
+                eventKey=event_key,
+                plan=None,
+                answer=assistant_text,
+            )
+        else:
+            try:
+                validated = planner.validate_plan(exec_plan_raw, req.existing_request_id)
+            except ValueError as e:
+                assistant_text = str(e)
+                response = IngestResponse(
+                    correlationId=cid,
+                    lane=lane,
+                    eventKey=event_key,
+                    plan=None,
+                    answer=assistant_text,
+                )
+            else:
+                log(
+                    "ingest_laneB_plan",
+                    cid,
+                    req.actor_id,
+                    req.tenant_id,
+                    validated.get("shard"),
+                    {"plan": validated},
+                )
+                plan_payload = validated
+                response = IngestResponse(
+                    correlationId=cid,
+                    lane=lane,
+                    eventKey=event_key,
+                    plan=validated,
+                )
+    else:  # HYBRID
+        qa_plan = routing.get("qa_plan")
+        exec_plan_raw = routing.get("execution_plan")
+        ans = answer_question(req.text, precomputed_plan=qa_plan, conversation_history=history_text)
+        exec_plan_validated = None
+        if exec_plan_raw:
+            try:
+                exec_plan_validated = planner.validate_plan(exec_plan_raw, req.existing_request_id)
+            except ValueError as e:
+                exec_plan_validated = {"error": str(e)}
+        log(
+            "ingest_hybrid",
+            cid,
+            req.actor_id,
+            req.tenant_id,
+            (exec_plan_validated or {}).get("shard") if isinstance(exec_plan_validated, dict) else None,
+            {"qa_calls": ans.get("plan", {}).get("calls", []), "plan": exec_plan_validated},
+        )
+        assistant_text = ans.get("answer") or ans.get("error")
+        plan_payload = exec_plan_validated
+        results_payload = ans.get("results")
+        response = IngestResponse(
+            correlationId=cid,
+            lane=lane,
+            eventKey=event_key,
+            answer=assistant_text,
+            plan=plan_payload,
+            results=results_payload,
+        )
+
+    GLOBAL_DB.append_conversation_message(req.tenant_id, req.actor_id, "user", req.text)
+    if assistant_text:
+        GLOBAL_DB.append_conversation_message(req.tenant_id, req.actor_id, "assistant", assistant_text)
+
+    return response

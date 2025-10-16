@@ -1,0 +1,7 @@
+INFO:     Will watch for changes in these directories: ['C:\\Users\\Natha\\Desktop\\Church-Brain']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [41592] using WatchFiles
+INFO:     Started server process [44036]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:64658 - "POST /ingest HTTP/1.1" 200 OK

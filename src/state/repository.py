@@ -9,6 +9,7 @@ from .models import (
     ShardLock,
     GuestConnectionVolunteer,
     GuestConnectionRequest,
+    ConversationMessage,
     new_id,
 )
 from datetime import datetime, timedelta
@@ -28,6 +29,7 @@ class InMemoryDB:
         self.guest_connection_requests: Dict[str, GuestConnectionRequest] = {}
         # Conversation state (ephemeral) keyed by correlation_id
         self.conversation_state: Dict[str, Dict[str, Any]] = {}
+        self.conversation_history: Dict[str, List[ConversationMessage]] = {}
         self._lock = threading.RLock()
 
     # Event log
@@ -119,6 +121,35 @@ class InMemoryDB:
 
     def get_conversation_state(self, correlation_id: str) -> Optional[Dict[str, Any]]:
         return self.conversation_state.get(correlation_id)
+
+    # Conversation history helpers
+    def _history_key(self, tenant_id: str, actor_id: str) -> str:
+        return f"{tenant_id}::{actor_id}"
+
+    def append_conversation_message(self, tenant_id: str, actor_id: str, role: str, content: str) -> ConversationMessage:
+        with self._lock:
+            key = self._history_key(tenant_id, actor_id)
+            history = self.conversation_history.setdefault(key, [])
+            message = ConversationMessage(
+                id=new_id(),
+                tenant_id=tenant_id,
+                actor_id=actor_id,
+                role=role,
+                content=content,
+                timestamp=_NOW(),
+            )
+            history.append(message)
+            # keep only the latest 50 messages per conversation to cap memory
+            if len(history) > 50:
+                del history[: len(history) - 50]
+            return message
+
+    def get_conversation_history(self, tenant_id: str, actor_id: str, limit: Optional[int] = 10) -> List[ConversationMessage]:
+        key = self._history_key(tenant_id, actor_id)
+        history = self.conversation_history.get(key, [])
+        if not limit or limit >= len(history):
+            return list(history)
+        return history[-limit:]
 
 # Singleton for simplicity in Phase 1
 GLOBAL_DB = InMemoryDB()
