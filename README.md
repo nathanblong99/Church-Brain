@@ -27,13 +27,103 @@ Two lanes, one truth: Lane A reads via Catalog Ops; Lane B acts via Verbs. Plann
 - Full policy NL->diff engine
 - Observability production stack
 
-## Dev Quickstart (will update as code lands)
+## Dev Quickstart
 ```bash
-# (Windows PowerShell) install deps
-type requirements.txt | %{ pip install $_ }
+# 1. Create and activate the venv (Python 3.11 recommended)
+python3.11 -m venv .venv
+source .venv/bin/activate
 
-# run API (after main.py exists)
-uvicorn main:app --reload
+# 2. Install dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 3. Launch the API (loads .env automatically via repository bootstrap)
+PYTHONPATH=src uvicorn src.main:app --host 127.0.0.1 --port 8100 --reload
+```
+
+## Database & Neon Setup
+We now back the conversational history and guest pairing flows with Neon (PostgreSQL):
+
+1. Provision a Neon project/branch and copy the connection string.
+2. Add it to `.env` – e.g.
+   ```
+   DATABASE_URL_DEV=postgresql://user:pass@ep-...neon.tech/neondb?sslmode=require
+   ```
+   `src/state/repository.py` calls `load_dotenv()` on import, so the server sees the value without extra shell steps.
+3. Apply the migrations in `db/migrations` (built in this repo):
+   ```bash
+   source .env
+   psql "$DATABASE_URL_DEV" -f db/migrations/0001_initial.sql
+   psql "$DATABASE_URL_DEV" -f db/migrations/0002_dev_seed.sql
+   psql "$DATABASE_URL_DEV" -f db/migrations/0003_dev_people_seed.sql
+   psql "$DATABASE_URL_DEV" -f db/migrations/0004_guest_pairing.sql
+   ```
+   Run them once per environment (dev/prod) or through your migration orchestrator.
+
+### Seeded Tenants & Personas
+- `0002_dev_seed.sql` inserts a deterministic tenant (`11111111-...1111`) plus a demo entity – useful for smoke tests.
+- `0003_dev_people_seed.sql` creates 100 staff + 100 member records with UUIDs, households, volunteer tags, and realistic contact JSON. Handy helper queries:
+  ```bash
+  -- Sample a seeded member
+  psql "$DATABASE_URL_DEV" -c "select entity_id, first_name, last_name from person where contact_json->>'seed_tag'='dev_seed_member' limit 5"
+
+  -- View conversation messages
+  psql "$DATABASE_URL_DEV" -c "select direction, body from message_log order by created_at desc limit 5"
+  ```
+
+## Manual Messaging Loop (Local)
+With the server running on port 8100, you can simulate inbound messages via `curl`:
+
+```bash
+# Example: seeded member asking about a visit
+curl -s -X POST http://127.0.0.1:8100/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "tenant_id": "11111111-1111-1111-1111-111111111111",
+        "actor_id": "31d80aeb-b2df-4295-97fc-baccf54194a1",
+        "actor_roles": [],
+        "text": "I want to visit your church"
+      }'
+```
+
+Conversation history persists to Neon (`conversation` + `message_log`), so you can inspect it later even after restarts.
+
+## Guest Pairing Persistence
+The existing `guest_pairing.*` verbs now write to real tables:
+
+- `guest_connection_request`: rows created whenever guests accept the offer to sit with a volunteer.
+- `guest_connection_volunteer`: tracks available hosts, status, and minimal metadata.
+
+`guest_pairing.request_create` can consume either explicit arguments or a `visitor_id`. When given a `visitor_id`, the verb auto-hydrates the request (name, phone/email, household info) from the `person` table and stores contextual notes (e.g., preferred date). This keeps the workflow reliable while still allowing more modular verbs for future custom behavior (search volunteers, send notifications, etc.).
+
+To execute a lane B plan that includes the pairing verb:
+```bash
+curl -s -X POST http://127.0.0.1:8100/execute \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "correlation_id": "<from /ingest plan>",
+        "plan": {
+          "steps": [
+            {
+              "verb": "guest_pairing.request_create",
+              "args": {
+                "visitor_id": "267a252f-8206-469c-b19f-23459b2117d5",
+                "preferred_date": "2025-10-19",
+                "notes": "User accepted offer to sit with a volunteer."
+              }
+            }
+          ]
+        },
+        "tenant_id": "11111111-1111-1111-1111-111111111111",
+        "actor_id": "267a252f-8206-469c-b19f-23459b2117d5",
+        "actor_roles": []
+      }'
+```
+
+Check the resulting pairing record:
+```bash
+psql "$DATABASE_URL_DEV" -c \
+  "select guest_name, contact, status, notes from guest_connection_request order by created_at desc limit 5"
 ```
 
 ## Guiding Mantra
