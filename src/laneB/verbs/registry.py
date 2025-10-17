@@ -280,11 +280,13 @@ class GuestVolunteerRegisterVerb(BaseVerb):
         return VerbResult(ok=True, data={"volunteer_id": volunteer.id, "status": "created"})
 
 class GuestRequestCreateArgs(BaseModel):
-    guest_name: str
-    contact: str
-    age_range: str
-    gender: str
-    marital_status: str
+    visitor_id: str | None = None
+    guest_name: str | None = None
+    contact: str | None = None
+    age_range: str | None = None
+    gender: str | None = None
+    marital_status: str | None = None
+    preferred_date: str | None = None
     notes: str | None = None
 
 @register
@@ -295,15 +297,59 @@ class GuestRequestCreateVerb(BaseVerb):
 
     @classmethod
     def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        visitor_id = args.get("visitor_id")
+        profile: dict | None = None
+        if visitor_id and hasattr(GLOBAL_DB, "get_person_profile"):
+            profile = GLOBAL_DB.get_person_profile(visitor_id)  # type: ignore[attr-defined]
+
+        def _coalesce(*values: Any, default: Any = None) -> Any:
+            for value in values:
+                if value not in (None, ""):
+                    return value
+            return default
+
+        profile_first = profile.get("first_name") if profile else None
+        profile_last = profile.get("last_name") if profile else None
+        profile_full_name = " ".join([part for part in [profile_first, profile_last] if part]) if (profile_first or profile_last) else None
+        guest_name = _coalesce(
+            args.get("guest_name"),
+            profile_full_name,
+            visitor_id,
+            default="Guest",
+        )
+
+        contact_json = profile.get("contact") if profile else None
+        contact_value = _coalesce(
+            args.get("contact"),
+            (contact_json or {}).get("phone") if isinstance(contact_json, dict) else None,
+            (contact_json or {}).get("email") if isinstance(contact_json, dict) else None,
+            visitor_id,
+            default="unknown",
+        )
+
+        age_range = _coalesce(args.get("age_range"), (contact_json or {}).get("age_range") if isinstance(contact_json, dict) else None)
+        gender = _coalesce(args.get("gender"), profile.get("gender") if profile else None, default="unknown")
+        marital_status = _coalesce(args.get("marital_status"), (contact_json or {}).get("marital_status") if isinstance(contact_json, dict) else None, default="unknown")
+
+        notes_segments: list[str] = []
+        if args.get("notes"):
+            notes_segments.append(str(args["notes"]))
+        if args.get("preferred_date"):
+            notes_segments.append(f"Preferred visit date: {args['preferred_date']}")
+        household_name = profile.get("household_name") if profile else None
+        if household_name:
+            notes_segments.append(f"Household: {household_name}")
+        notes = " | ".join(notes_segments) if notes_segments else None
+
         request = GuestConnectionRequest(
             id=new_id(),
             tenant_id=ctx.tenant_id,
-            guest_name=args["guest_name"],
-            contact=args["contact"],
-            age_range=args["age_range"],
-            gender=args["gender"],
-            marital_status=args["marital_status"],
-            notes=args.get("notes"),
+            guest_name=guest_name,
+            contact=contact_value,
+            age_range=age_range or "unspecified",
+            gender=gender,
+            marital_status=marital_status,
+            notes=notes,
         )
         GLOBAL_DB.save_guest_connection_request(request)
         return VerbResult(ok=True, data={"request_id": request.id})

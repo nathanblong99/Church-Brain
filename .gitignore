@@ -11,6 +11,7 @@ __pycache__/
 *.sqlite
 *.db
 cache/
+uvicorn*.log
 
 # IDE
 .vscode/
@@ -19,4 +20,3 @@ cache/
 # OS
 .DS_Store
 Thumbs.db
-
