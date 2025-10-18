@@ -18,6 +18,7 @@ Prefer modular primitives first:
 - make_offers / assign / unassign: Traditional volunteer scheduling helpers.
 Fallback verbs (use only when the modular stack cannot accomplish the goal yet):
 - guest_pairing.request_create, guest_pairing.match, guest_pairing.assign, guest_pairing.volunteer_register.
+If the user accepts an offer to sit with a volunteer (e.g., "yes, I'd like that" after we asked), add guest_pairing.request_create as the first step to capture the request, then optionally follow with guest_pairing.match or other handoff verbs.
 If the inbound message lacks required inputs for a verb, add a step (sms.send, conversation.reply, notify.staff, etc.) to gather or escalate instead of inventing values.
 """
 

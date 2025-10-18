@@ -88,6 +88,13 @@ curl -s -X POST http://127.0.0.1:8100/ingest \
 
 Conversation history persists to Neon (`conversation` + `message_log`), so you can inspect it later even after restarts.
 
+### Browser Test UI
+Prefer a conversational feel? Launch the built-in test chat at [http://127.0.0.1:8100/test/chat](http://127.0.0.1:8100/test/chat) (or the port you’re running on).
+
+- Choose “Create new guest” to spin up a fresh actor record automatically (phone/email fields included), or switch to “Use existing actor UUID”.
+- Enter the message text and optional roles; the JSON response from `/ingest` shows up beneath the form.
+- Requests go through the new helper endpoint `/test/send`, which reuses the same routing/ingest stack you hit via curl.
+
 ## Guest Pairing Persistence
 The existing `guest_pairing.*` verbs now write to real tables:
 
