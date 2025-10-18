@@ -42,6 +42,8 @@ def route_with_plan(
             " If lane is B or HYBRID you MUST populate execution_plan as {\"steps\":[{\"verb\":name,\"args\":{}}], \"shard\": string|null}."
             f" Allowed verbs: {verbs_list}."
             " Use existingRequestId if provided when updating an existing request."
+            " When planning Lane B actions, prefer modular verbs (conversation.*, guest_request.*, guest_volunteer.*, create_record, update_record, schedule.timer) before falling back to guest_pairing.* verbs."
+            " Treat stubbed verbs (e.g., people.search, catalog.run) as unavailable until they are implemented."
         )
     else:
         plan_guidance = "Set qa_plan and execution_plan to null; only choose the correct lane."

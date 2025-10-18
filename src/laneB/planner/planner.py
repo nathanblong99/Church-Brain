@@ -5,17 +5,20 @@ from llm.provider import call_llm, safe_json_parse
 from laneB.verbs.registry import VERBS
 
 VERB_CHEATSHEET = """
-Verb cheat sheet (only call verbs that exist in the registry and supply all required fields):
-- guest_pairing.request_create: Capture a guest's info when they express interest in being paired. Args: guest_name, contact, age_range, gender, marital_status, optional notes.
-- guest_pairing.match: Suggest active volunteers for a guest request. Args: request_id, optional limit (default 3). Use after request_create.
-- guest_pairing.assign: Confirm a pairing once a volunteer is selected. Args: request_id, volunteer_id. Use after match.
-- guest_pairing.volunteer_register: When a volunteer opts in via SMS, store or update their profile. Args include name, phone, age_range, gender, marital_status, optional active.
-- sms.send: Send a templated text. Args: to, template, variables, idempotency_key. Use to gather missing details or confirm next steps.
-- notify.staff: Alert a staff role about work that needs a human. Args: staff_role, template, variables.
-- create_record / update_record: Generic data writes. Provide kind and structured data.
-- make_offers / wait_for_replies / assign / unassign: Use for volunteer role scheduling flows.
-- schedule.timer: Queue a follow-up action after delay_seconds with a payload.
-If the inbound message lacks required data for a verb, plan a step (e.g., sms.send or notify.staff) to obtain it rather than inventing values.
+Verb cheat sheet (only call verbs that exist in the registry and supply all required fields).
+Prefer modular primitives first:
+- conversation.reply: Send a free-text response to the actor. Args: body, optional channel/metadata.
+- conversation.tag / conversation.note / conversation.state_get / conversation.state_merge: Track contextual labels, internal notes, or scratch state across steps.
+- guest_request.list / guest_request.get / guest_request.update: Read or update guest connection requests. Use update->changes to set fields (status, volunteer_id, notes, etc.).
+- guest_volunteer.list / guest_volunteer.get / guest_volunteer.update: Inspect or adjust volunteer profiles. Use release_request=true to free a volunteer.
+- create_record / update_record: Generic data writes outside guest pairing (e.g., volunteer_request scaffolding).
+- sms.send / email.send: Send templated outbound messages (idempotent).
+- notify.staff: Alert a staff role when human follow-up is needed.
+- schedule.timer: Queue a follow-up payload after delay_seconds.
+- make_offers / assign / unassign: Traditional volunteer scheduling helpers.
+Fallback verbs (use only when the modular stack cannot accomplish the goal yet):
+- guest_pairing.request_create, guest_pairing.match, guest_pairing.assign, guest_pairing.volunteer_register.
+If the inbound message lacks required inputs for a verb, add a step (sms.send, conversation.reply, notify.staff, etc.) to gather or escalate instead of inventing values.
 """
 
 

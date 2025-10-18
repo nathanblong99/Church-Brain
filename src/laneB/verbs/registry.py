@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Dict, Type, Any
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, Field
 from state.event_log import log
 from authz.engine import can as authz_can
 from state.repository import GLOBAL_DB
@@ -123,6 +123,146 @@ class UnassignVerb(BaseVerb):
             GLOBAL_DB.save_volunteer_request(req)
         return VerbResult(ok=True, data={"assignments": req.assignments})
 
+
+class ConversationReplyArgs(BaseModel):
+    body: str
+    channel: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+@register
+class ConversationReplyVerb(BaseVerb):
+    name = "conversation.reply"
+    schema = ConversationReplyArgs
+    authz_action = "message.send"
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        message = GLOBAL_DB.append_conversation_message(ctx.tenant_id, ctx.actor_id, "assistant", args["body"])
+        log(
+            "conversation_reply",
+            ctx.correlation_id,
+            ctx.actor_id,
+            ctx.tenant_id,
+            ctx.shard,
+            {"channel": args.get("channel"), "metadata": args.get("metadata")},
+        )
+        return VerbResult(
+            ok=True,
+            data={
+                "message_id": message.id,
+                "body": message.content,
+                "timestamp": message.timestamp.isoformat(),
+            },
+        )
+
+
+class ConversationNoteArgs(BaseModel):
+    note: str
+    visibility: str | None = None
+
+
+@register
+class ConversationNoteVerb(BaseVerb):
+    name = "conversation.note"
+    schema = ConversationNoteArgs
+    authz_action = "planning.create"
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        state = GLOBAL_DB.get_conversation_state(ctx.correlation_id) or {}
+        notes: list[dict[str, Any]] = list(state.get("notes", []))
+        entry = {
+            "note": args["note"],
+            "visibility": args.get("visibility", "internal"),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        notes.append(entry)
+        state["notes"] = notes
+        GLOBAL_DB.set_conversation_state(ctx.correlation_id, state)
+        log(
+            "conversation_note",
+            ctx.correlation_id,
+            ctx.actor_id,
+            ctx.tenant_id,
+            ctx.shard,
+            {"visibility": entry["visibility"]},
+        )
+        return VerbResult(ok=True, data={"notes": notes})
+
+
+class ConversationTagArgs(BaseModel):
+    tags: list[str]
+    replace: bool = False
+
+
+@register
+class ConversationTagVerb(BaseVerb):
+    name = "conversation.tag"
+    schema = ConversationTagArgs
+    authz_action = "planning.create"
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        state = GLOBAL_DB.get_conversation_state(ctx.correlation_id) or {}
+        existing = set(state.get("tags", []))
+        incoming = {tag.strip() for tag in args["tags"] if tag.strip()}
+        tags = sorted(incoming if args.get("replace") else existing.union(incoming))
+        state["tags"] = tags
+        GLOBAL_DB.set_conversation_state(ctx.correlation_id, state)
+        log(
+            "conversation_tagged",
+            ctx.correlation_id,
+            ctx.actor_id,
+            ctx.tenant_id,
+            ctx.shard,
+            {"tags": tags},
+        )
+        return VerbResult(ok=True, data={"tags": tags})
+
+
+class ConversationStateGetArgs(BaseModel):
+    keys: list[str] | None = None
+
+
+@register
+class ConversationStateGetVerb(BaseVerb):
+    name = "conversation.state_get"
+    schema = ConversationStateGetArgs
+    authz_action = "planning.create"
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        state = GLOBAL_DB.get_conversation_state(ctx.correlation_id) or {}
+        if args.get("keys"):
+            subset = {key: state.get(key) for key in args["keys"]}
+            return VerbResult(ok=True, data=subset)
+        return VerbResult(ok=True, data=state)
+
+
+class ConversationStateMergeArgs(BaseModel):
+    data: dict
+    replace: bool = False
+
+
+@register
+class ConversationStateMergeVerb(BaseVerb):
+    name = "conversation.state_merge"
+    schema = ConversationStateMergeArgs
+    authz_action = "planning.create"
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        current = GLOBAL_DB.get_conversation_state(ctx.correlation_id) or {}
+        incoming = args.get("data", {})
+        if args.get("replace"):
+            merged = dict(incoming)
+        else:
+            merged = {**current, **incoming}
+        GLOBAL_DB.set_conversation_state(ctx.correlation_id, merged)
+        log("conversation_state_updated", ctx.correlation_id, ctx.actor_id, ctx.tenant_id, ctx.shard, {"keys": list(incoming.keys())})
+        return VerbResult(ok=True, data=merged)
+
 class SmsSendArgs(BaseModel):
     to: str
     template: str
@@ -237,6 +377,255 @@ class UpdateRecordVerb(BaseVerb):
             GLOBAL_DB.save_volunteer_request(req)
             return VerbResult(ok=True, data={"id": req.id})
         return VerbResult(ok=False, error="unknown_kind")
+
+
+class GuestRequestGetArgs(BaseModel):
+    request_id: str
+
+
+@register
+class GuestRequestGetVerb(BaseVerb):
+    name = "guest_request.get"
+    schema = GuestRequestGetArgs
+    authz_action = "planning.create"
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        request = GLOBAL_DB.get_guest_connection_request(args["request_id"])
+        if not request or request.tenant_id != ctx.tenant_id:
+            return VerbResult(ok=False, error="guest_request_not_found")
+        return VerbResult(ok=True, data=_serialize_guest_request(request))
+
+
+class GuestRequestListArgs(BaseModel):
+    status: str | None = None
+    assigned: bool | None = None
+    limit: int | None = 10
+    search: str | None = None
+
+
+@register
+class GuestRequestListVerb(BaseVerb):
+    name = "guest_request.list"
+    schema = GuestRequestListArgs
+    authz_action = "planning.create"
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        requests = GLOBAL_DB.list_guest_connection_requests(
+            ctx.tenant_id,
+            status=args.get("status"),
+            assigned=args.get("assigned"),
+        )
+        search = (args.get("search") or "").strip().lower()
+        if search:
+            requests = [
+                req
+                for req in requests
+                if search in (req.guest_name or "").lower()
+                or search in (req.contact or "").lower()
+                or search in (req.notes or "").lower()
+            ]
+        limit = args.get("limit")
+        if isinstance(limit, int) and limit >= 0:
+            requests = requests[:limit] if limit else []
+        data = [_serialize_guest_request(req) for req in requests]
+        return VerbResult(ok=True, data={"requests": data})
+
+
+class GuestRequestUpdateArgs(BaseModel):
+    request_id: str
+    changes: dict[str, Any] = Field(default_factory=dict)
+    append_note: str | None = None
+
+
+@register
+class GuestRequestUpdateVerb(BaseVerb):
+    name = "guest_request.update"
+    schema = GuestRequestUpdateArgs
+    authz_action = "volunteer.manage"
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        request = GLOBAL_DB.get_guest_connection_request(args["request_id"])
+        if not request or request.tenant_id != ctx.tenant_id:
+            return VerbResult(ok=False, error="guest_request_not_found")
+        changes = dict(args.get("changes") or {})
+        append_note = args.get("append_note")
+        if not changes and not append_note:
+            return VerbResult(ok=False, error="no_changes_provided")
+        allowed_fields = {
+            "guest_name",
+            "contact",
+            "age_range",
+            "gender",
+            "marital_status",
+            "status",
+            "volunteer_id",
+            "notes",
+        }
+        unknown = [key for key in changes if key not in allowed_fields]
+        if unknown:
+            return VerbResult(ok=False, error=f"unsupported_fields:{','.join(sorted(unknown))}")
+        status = changes.get("status")
+        if status and status not in {"OPEN", "MATCHED", "CLOSED"}:
+            return VerbResult(ok=False, error="invalid_status")
+
+        new_volunteer_id = changes.get("volunteer_id") if "volunteer_id" in changes else request.volunteer_id
+        replacement_volunteer = None
+        if "volunteer_id" in changes and new_volunteer_id:
+            replacement_volunteer = GLOBAL_DB.get_guest_connection_volunteer(str(new_volunteer_id))
+            if not replacement_volunteer or replacement_volunteer.tenant_id != ctx.tenant_id:
+                return VerbResult(ok=False, error="volunteer_not_found")
+            if not replacement_volunteer.active:
+                return VerbResult(ok=False, error="volunteer_inactive")
+            if (
+                replacement_volunteer.currently_assigned_request_id
+                and replacement_volunteer.currently_assigned_request_id != request.id
+            ):
+                return VerbResult(ok=False, error="volunteer_already_assigned")
+
+        for field in ("guest_name", "contact", "age_range", "gender", "marital_status", "notes"):
+            if field in changes:
+                setattr(request, field, changes[field])
+
+        if append_note:
+            note = append_note.strip()
+            if note:
+                request.notes = f"{request.notes} | {note}" if request.notes else note
+
+        old_volunteer_id = request.volunteer_id
+        if "volunteer_id" in changes:
+            if old_volunteer_id and old_volunteer_id != new_volunteer_id:
+                previous = GLOBAL_DB.get_guest_connection_volunteer(old_volunteer_id)
+                if previous and previous.currently_assigned_request_id == request.id:
+                    previous.currently_assigned_request_id = None
+                    GLOBAL_DB.save_guest_connection_volunteer(previous)
+            if new_volunteer_id:
+                assert replacement_volunteer is not None
+                replacement_volunteer.currently_assigned_request_id = request.id
+                replacement_volunteer.last_matched_at = datetime.utcnow()
+                GLOBAL_DB.save_guest_connection_volunteer(replacement_volunteer)
+                request.volunteer_id = replacement_volunteer.id
+                if request.status == "OPEN" and "status" not in changes:
+                    request.status = "MATCHED"
+            else:
+                request.volunteer_id = None
+                if request.status == "MATCHED" and "status" not in changes:
+                    request.status = "OPEN"
+
+        if status:
+            if status == "CLOSED" and request.volunteer_id:
+                volunteer = GLOBAL_DB.get_guest_connection_volunteer(request.volunteer_id)
+                if volunteer and volunteer.currently_assigned_request_id == request.id:
+                    volunteer.currently_assigned_request_id = None
+                    GLOBAL_DB.save_guest_connection_volunteer(volunteer)
+                request.volunteer_id = None
+            request.status = status
+
+        GLOBAL_DB.save_guest_connection_request(request)
+        log("guest_request_updated", ctx.correlation_id, ctx.actor_id, ctx.tenant_id, ctx.shard, {"request_id": request.id})
+        return VerbResult(ok=True, data=_serialize_guest_request(request))
+
+
+class GuestVolunteerGetArgs(BaseModel):
+    volunteer_id: str
+
+
+@register
+class GuestVolunteerGetVerb(BaseVerb):
+    name = "guest_volunteer.get"
+    schema = GuestVolunteerGetArgs
+    authz_action = "planning.create"
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        volunteer = GLOBAL_DB.get_guest_connection_volunteer(args["volunteer_id"])
+        if not volunteer or volunteer.tenant_id != ctx.tenant_id:
+            return VerbResult(ok=False, error="volunteer_not_found")
+        return VerbResult(ok=True, data=_serialize_guest_volunteer(volunteer))
+
+
+class GuestVolunteerListArgs(BaseModel):
+    active: bool | None = None
+    available_only: bool = False
+    limit: int | None = 10
+    search: str | None = None
+
+
+@register
+class GuestVolunteerListVerb(BaseVerb):
+    name = "guest_volunteer.list"
+    schema = GuestVolunteerListArgs
+    authz_action = "planning.create"
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        volunteers = GLOBAL_DB.list_guest_connection_volunteers(
+            ctx.tenant_id,
+            active=args.get("active"),
+            only_available=args.get("available_only", False),
+        )
+        search = (args.get("search") or "").strip().lower()
+        if search:
+            volunteers = [
+                vol
+                for vol in volunteers
+                if search in vol.name.lower()
+                or search in vol.phone.lower()
+                or search in (vol.gender or "").lower()
+            ]
+        limit = args.get("limit")
+        if isinstance(limit, int) and limit >= 0:
+            volunteers = volunteers[:limit] if limit else []
+        data = [_serialize_guest_volunteer(vol) for vol in volunteers]
+        return VerbResult(ok=True, data={"volunteers": data})
+
+
+class GuestVolunteerUpdateArgs(BaseModel):
+    volunteer_id: str
+    changes: dict[str, Any] = Field(default_factory=dict)
+    release_request: bool | None = None
+
+
+@register
+class GuestVolunteerUpdateVerb(BaseVerb):
+    name = "guest_volunteer.update"
+    schema = GuestVolunteerUpdateArgs
+    authz_action = "volunteer.manage"
+
+    @classmethod
+    def execute(cls, args: dict, ctx: VerbContext) -> VerbResult:
+        volunteer = GLOBAL_DB.get_guest_connection_volunteer(args["volunteer_id"])
+        if not volunteer or volunteer.tenant_id != ctx.tenant_id:
+            return VerbResult(ok=False, error="volunteer_not_found")
+        changes = dict(args.get("changes") or {})
+        if not changes and not args.get("release_request"):
+            return VerbResult(ok=False, error="no_changes_provided")
+        allowed_fields = {"name", "phone", "age_range", "gender", "marital_status", "active"}
+        unknown = [key for key in changes if key not in allowed_fields]
+        if unknown:
+            return VerbResult(ok=False, error=f"unsupported_fields:{','.join(sorted(unknown))}")
+        for field in ("name", "phone", "age_range", "gender", "marital_status"):
+            if field in changes and changes[field] is not None:
+                setattr(volunteer, field, changes[field])
+        if "active" in changes:
+            volunteer.active = bool(changes["active"])
+        release = bool(args.get("release_request"))
+        if volunteer.active is False and volunteer.currently_assigned_request_id:
+            release = True
+        if release and volunteer.currently_assigned_request_id:
+            request = GLOBAL_DB.get_guest_connection_request(volunteer.currently_assigned_request_id)
+            if request and request.volunteer_id == volunteer.id:
+                request.volunteer_id = None
+                if request.status == "MATCHED":
+                    request.status = "OPEN"
+                GLOBAL_DB.save_guest_connection_request(request)
+            volunteer.currently_assigned_request_id = None
+        GLOBAL_DB.save_guest_connection_volunteer(volunteer)
+        log("guest_volunteer_updated", ctx.correlation_id, ctx.actor_id, ctx.tenant_id, ctx.shard, {"volunteer_id": volunteer.id})
+        return VerbResult(ok=True, data=_serialize_guest_volunteer(volunteer))
+
 
 class GuestVolunteerRegisterArgs(BaseModel):
     name: str
@@ -543,6 +932,41 @@ class RoomConfirmVerb(BaseVerb):
         if not ok:
             return VerbResult(ok=False, error=reason)
         return VerbResult(ok=True, data={"hold_id": args["hold_id"], "status": "CONFIRMED"})
+
+
+def _serialize_guest_request(request: GuestConnectionRequest) -> dict[str, Any]:
+    return {
+        "id": request.id,
+        "tenant_id": request.tenant_id,
+        "guest_name": request.guest_name,
+        "contact": request.contact,
+        "age_range": request.age_range,
+        "gender": request.gender,
+        "marital_status": request.marital_status,
+        "status": request.status,
+        "volunteer_id": request.volunteer_id,
+        "notes": request.notes,
+        "created_at": request.created_at.isoformat(),
+        "updated_at": request.updated_at.isoformat(),
+    }
+
+
+def _serialize_guest_volunteer(volunteer: GuestConnectionVolunteer) -> dict[str, Any]:
+    return {
+        "id": volunteer.id,
+        "tenant_id": volunteer.tenant_id,
+        "name": volunteer.name,
+        "phone": volunteer.phone,
+        "age_range": volunteer.age_range,
+        "gender": volunteer.gender,
+        "marital_status": volunteer.marital_status,
+        "active": volunteer.active,
+        "currently_assigned_request_id": volunteer.currently_assigned_request_id,
+        "last_matched_at": volunteer.last_matched_at.isoformat() if volunteer.last_matched_at else None,
+        "created_at": volunteer.created_at.isoformat(),
+        "updated_at": volunteer.updated_at.isoformat(),
+    }
+
 
 # ---- Execution Helper ----
 

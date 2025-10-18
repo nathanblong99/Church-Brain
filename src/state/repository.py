@@ -70,12 +70,33 @@ class InMemoryDB:
                 return vol
         return None
 
+    def list_guest_connection_volunteers(
+        self,
+        tenant_id: str,
+        *,
+        active: Optional[bool] = None,
+        only_available: bool = False,
+    ) -> List[GuestConnectionVolunteer]:
+        with self._lock:
+            volunteers = [
+                vol
+                for vol in self.guest_connection_volunteers.values()
+                if vol.tenant_id == tenant_id
+                and (active is None or vol.active == active)
+                and (not only_available or not vol.currently_assigned_request_id)
+            ]
+        volunteers.sort(
+            key=lambda v: (
+                0 if v.last_matched_at is None else 1,
+                v.last_matched_at or datetime.fromtimestamp(0),
+                v.created_at,
+                v.id,
+            )
+        )
+        return volunteers
+
     def list_active_guest_connection_volunteers(self, tenant_id: str) -> List[GuestConnectionVolunteer]:
-        return [
-            vol
-            for vol in self.guest_connection_volunteers.values()
-            if vol.tenant_id == tenant_id and vol.active
-        ]
+        return self.list_guest_connection_volunteers(tenant_id, active=True, only_available=False)
 
     # Guest connection requests
     def save_guest_connection_request(self, request: GuestConnectionRequest):
@@ -85,6 +106,28 @@ class InMemoryDB:
 
     def get_guest_connection_request(self, request_id: str) -> Optional[GuestConnectionRequest]:
         return self.guest_connection_requests.get(request_id)
+
+    def list_guest_connection_requests(
+        self,
+        tenant_id: str,
+        *,
+        status: Optional[str] = None,
+        assigned: Optional[bool] = None,
+    ) -> List[GuestConnectionRequest]:
+        with self._lock:
+            requests = [
+                req
+                for req in self.guest_connection_requests.values()
+                if req.tenant_id == tenant_id
+                and (status is None or req.status == status)
+                and (
+                    assigned is None
+                    or (assigned and req.volunteer_id)
+                    or (assigned is False and not req.volunteer_id)
+                )
+            ]
+        requests.sort(key=lambda r: (r.created_at, r.id))
+        return requests
 
     # Room holds
     def save_room_hold(self, hold: RoomHold):
@@ -509,22 +552,37 @@ class PostgresBackedDB(InMemoryDB):
             self._logger.exception("Falling back to in-memory volunteer search")
         return super().find_guest_connection_volunteer_by_phone(tenant_id, phone)
 
-    def list_active_guest_connection_volunteers(self, tenant_id: str) -> List[GuestConnectionVolunteer]:
+    def list_guest_connection_volunteers(
+        self,
+        tenant_id: str,
+        *,
+        active: Optional[bool] = None,
+        only_available: bool = False,
+    ) -> List[GuestConnectionVolunteer]:
         try:
             tenant_uuid = self._safe_uuid(tenant_id)
             if not tenant_uuid:
                 raise ValueError("Invalid tenant identifier")
             with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
+                filters: list[str] = ["tenant_id = %s"]
+                params: list[Any] = [tenant_uuid]
+                if active is not None:
+                    filters.append("active = %s")
+                    params.append(active)
+                if only_available:
+                    filters.append("currently_assigned_request_id is null")
+                where_clause = " and ".join(filters)
+                query = (
                     """
                     select *
                     from guest_connection_volunteer
-                    where tenant_id = %s
-                      and active = true
-                    order by coalesce(last_matched_at, to_timestamp(0))
-                    """,
-                    (tenant_uuid,),
+                    where """
+                    + where_clause
+                    + """
+                    order by coalesce(last_matched_at, to_timestamp(0)), created_at
+                    """
                 )
+                cur.execute(query, params)
                 rows = cur.fetchall()
                 volunteers: List[GuestConnectionVolunteer] = []
                 for row in rows:
@@ -547,7 +605,14 @@ class PostgresBackedDB(InMemoryDB):
                 return volunteers
         except Exception:
             self._logger.exception("Falling back to in-memory volunteer list")
-        return super().list_active_guest_connection_volunteers(tenant_id)
+        return super().list_guest_connection_volunteers(
+            tenant_id,
+            active=active,
+            only_available=only_available,
+        )
+
+    def list_active_guest_connection_volunteers(self, tenant_id: str) -> List[GuestConnectionVolunteer]:
+        return self.list_guest_connection_volunteers(tenant_id, active=True, only_available=False)
 
     # Guest connection requests
     def save_guest_connection_request(self, request: GuestConnectionRequest):
@@ -607,6 +672,64 @@ class PostgresBackedDB(InMemoryDB):
             return super().save_guest_connection_request(request)
         self.guest_connection_requests[request.id] = request
         return request
+
+    def list_guest_connection_requests(
+        self,
+        tenant_id: str,
+        *,
+        status: Optional[str] = None,
+        assigned: Optional[bool] = None,
+    ) -> List[GuestConnectionRequest]:
+        try:
+            tenant_uuid = self._safe_uuid(tenant_id)
+            if not tenant_uuid:
+                raise ValueError("Invalid tenant identifier")
+            with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                filters: list[str] = ["tenant_id = %s"]
+                params: list[Any] = [tenant_uuid]
+                if status:
+                    filters.append("status = %s")
+                    params.append(status)
+                if assigned is not None:
+                    if assigned:
+                        filters.append("volunteer_id is not null")
+                    else:
+                        filters.append("volunteer_id is null")
+                where_clause = " and ".join(filters)
+                query = (
+                    """
+                    select *
+                    from guest_connection_request
+                    where """
+                    + where_clause
+                    + """
+                    order by created_at
+                    """
+                )
+                cur.execute(query, params)
+                rows = cur.fetchall()
+                requests: List[GuestConnectionRequest] = []
+                for row in rows:
+                    request = GuestConnectionRequest(
+                        id=str(row["id"]),
+                        tenant_id=str(row["tenant_id"]),
+                        guest_name=row["guest_name"],
+                        contact=row["contact"],
+                        age_range=row["age_range"],
+                        gender=row["gender"],
+                        marital_status=row["marital_status"],
+                        status=row["status"],
+                        volunteer_id=str(row["volunteer_id"]) if row["volunteer_id"] else None,
+                        notes=row["notes"],
+                        created_at=row["created_at"],
+                        updated_at=row["updated_at"],
+                    )
+                    self.guest_connection_requests[request.id] = request
+                    requests.append(request)
+                return requests
+        except Exception:
+            self._logger.exception("Falling back to in-memory request list")
+        return super().list_guest_connection_requests(tenant_id, status=status, assigned=assigned)
 
     def get_guest_connection_request(self, request_id: str) -> Optional[GuestConnectionRequest]:
         try:
